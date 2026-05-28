@@ -2,6 +2,9 @@
 data/
 *.zip
 
+# Ignore local agent memory state
+memories.json
+
 # Ignore PyTorch model weight saves
 *.pt
 *.pth

@@ -41,10 +41,51 @@ def threshold_thermal(temp_c: np.ndarray, threshold_c: float = DEFAULT_THRESHOLD
     return binary * 255
 
 
-def list_frame_ids() -> list[str]:
+DEFAULT_OCCLUSION_TAU = 0.95
+_OCCLUSION_CACHE = PROJECT_ROOT / "results" / "occluded_frames.json"
+
+
+def smoke_fraction(rgb: np.ndarray) -> float:
+    """Fraction of the frame that is bright + desaturated + low-texture (smoke).
+
+    A frame near 1.0 is essentially full-frame smoke: the fire location is not
+    recoverable from RGB regardless of method (a degenerate, unsolvable input).
+    """
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    s, v = hsv[..., 1], hsv[..., 2]
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+    smooth = cv2.GaussianBlur(lap, (0, 0), 3) < 8
+    return float(((v > 120) & (s < 60) & smooth).mean())
+
+
+def occluded_frame_ids(tau: float = DEFAULT_OCCLUSION_TAU,
+                       use_cache: bool = True) -> set[str]:
+    """Frame ids whose smoke_fraction >= tau. Cached to results/ to avoid
+    recomputing on every training run; delete the cache to force a refresh."""
+    import json
+    if use_cache and _OCCLUSION_CACHE.exists():
+        data = json.loads(_OCCLUSION_CACHE.read_text())
+        if abs(data.get("tau", -1) - tau) < 1e-9:
+            return set(data["ids"])
+    all_ids = sorted(p.stem for p in RGB_DIR.glob("*.JPG"))
+    occ = [fid for fid in all_ids
+           if smoke_fraction(cv2.cvtColor(cv2.imread(str(RGB_DIR / f"{fid}.JPG")),
+                                          cv2.COLOR_BGR2RGB)) >= tau]
+    _OCCLUSION_CACHE.parent.mkdir(exist_ok=True)
+    _OCCLUSION_CACHE.write_text(json.dumps({"tau": tau, "ids": occ}))
+    return set(occ)
+
+
+def list_frame_ids(exclude_occluded: bool = False,
+                   occlusion_tau: float = DEFAULT_OCCLUSION_TAU) -> list[str]:
     if not RGB_DIR.exists():
         raise FileNotFoundError(f"RGB directory not found: {RGB_DIR}")
-    return sorted(p.stem for p in RGB_DIR.glob("*.JPG"))
+    ids = sorted(p.stem for p in RGB_DIR.glob("*.JPG"))
+    if exclude_occluded:
+        occ = occluded_frame_ids(occlusion_tau)
+        ids = [i for i in ids if i not in occ]
+    return ids
 
 
 def load_frame(frame_id: str, threshold_c: float = DEFAULT_THRESHOLD_C,

@@ -32,8 +32,11 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--method", choices=["color", "kass", "gac", "all"], default="all")
-    ap.add_argument("--init", choices=["oracle", "color"], default="oracle",
-                    help="Contour init for kass/gac: oracle (from GT) or color (RGB floor)")
+    ap.add_argument("--init", choices=["oracle", "color", "unet"], default="oracle",
+                    help="Contour init for kass/gac: oracle (GT), color (RGB floor), "
+                         "or unet (trained U-Net prediction)")
+    ap.add_argument("--unet-tag", default="",
+                    help="Checkpoint suffix for --init unet (e.g. _ft for focal-tversky)")
     ap.add_argument("--energy-mode", default="rg", choices=["rg", "thermal"])
     ap.add_argument("--color-tau", type=float, default=DEFAULT_TAU,
                     help="R-G threshold for the color floor / color init (default 0.15)")
@@ -43,10 +46,19 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
+def seed_mask(frame, args) -> np.ndarray | None:
+    if args.init == "oracle":
+        return None  # run_kass/run_gac fall back to the GT mask
+    if args.init == "color":
+        return color_threshold_mask(frame.rgb, args.color_tau)
+    from flame.unet_seed import unet_seed_mask
+    return unet_seed_mask(frame, tag=args.unet_tag)
+
+
 def predict(name: str, frame, args, cfg_kass, cfg_gac) -> np.ndarray:
     if name == "color":
         return color_threshold_mask(frame.rgb, args.color_tau)
-    init_mask = None if args.init == "oracle" else color_threshold_mask(frame.rgb, args.color_tau)
+    init_mask = seed_mask(frame, args)
     if name == "kass":
         return run_kass(frame, cfg_kass, init_mask=init_mask)
     return run_gac(frame, cfg_gac, init_mask=init_mask)

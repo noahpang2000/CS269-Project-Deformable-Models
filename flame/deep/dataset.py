@@ -28,11 +28,14 @@ class FlameDataset(Dataset):
     """Per-pixel datasets (U-Net, DALS): returns image [3,H,W] and mask [1,H,W]."""
 
     def __init__(self, frame_ids: list[str], threshold_c: float = DEFAULT_THRESHOLD_C,
-                 size: int = NET_SIZE, augment: bool = False):
+                 size: int = NET_SIZE, augment: bool = False, in_channels: str = "rgb",
+                 aug_mode: str = "light"):
         self.frame_ids = frame_ids
         self.threshold_c = threshold_c
         self.size = size
         self.augment = augment
+        self.in_channels = in_channels
+        self.aug_mode = aug_mode  # "light" (flip only) or "strong" (flip/rot/scale/photometric)
 
     def __len__(self) -> int:
         return len(self.frame_ids)
@@ -44,12 +47,42 @@ class FlameDataset(Dataset):
         return rgb, mask
 
     def __getitem__(self, i: int) -> dict:
+        from flame.deep.channels import build_input
         rgb, mask = self._load_resized(self.frame_ids[i])
-        if self.augment and np.random.rand() < 0.5:
-            rgb, mask = rgb[:, ::-1].copy(), mask[:, ::-1].copy()
-        image = torch.from_numpy(rgb).float().permute(2, 0, 1) / 255.0
+        if self.augment:
+            if self.aug_mode in ("medium", "strong"):
+                from flame.deep import augment as A
+                fn = A.strong_augment if self.aug_mode == "strong" else A.medium_augment
+                rgb, mask = fn(rgb, mask)
+            elif np.random.rand() < 0.5:
+                rgb, mask = rgb[:, ::-1].copy(), mask[:, ::-1].copy()
+        feat = build_input(rgb, self.in_channels)          # [H,W,C] float32 in [0,1]
+        image = torch.from_numpy(feat).permute(2, 0, 1).contiguous()
         target = torch.from_numpy((mask > 0).astype(np.float32))[None]
         return {"frame_id": self.frame_ids[i], "image": image, "mask": target}
+
+
+class ThermalDataset(FlameDataset):
+    """RGB input + normalized continuous thermal field [1,H,W] in [0,1].
+
+    Also returns the binary mask so training can monitor IoU at the 150C
+    threshold. Used by the cross-modal thermal-regression regularizer.
+    """
+
+    def __getitem__(self, i: int) -> dict:
+        from flame.deep.thermal_reg import celsius_to_norm
+        f = load_frame(self.frame_ids[i], threshold_c=self.threshold_c)
+        rgb = cv2.resize(f.rgb, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
+        # resize the thermal field with linear interp (it is continuous, not a label)
+        therm = cv2.resize(f.thermal_c, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(f.gt_mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
+        if self.augment and np.random.rand() < 0.5:
+            rgb, therm, mask = rgb[:, ::-1].copy(), therm[:, ::-1].copy(), mask[:, ::-1].copy()
+        image = torch.from_numpy(rgb).float().permute(2, 0, 1) / 255.0
+        therm_norm = celsius_to_norm(torch.from_numpy(therm).float())[None]
+        target = torch.from_numpy((mask > 0).astype(np.float32))[None]
+        return {"frame_id": self.frame_ids[i], "image": image,
+                "thermal": therm_norm, "mask": target}
 
 
 class SnakeDataset(FlameDataset):
@@ -60,16 +93,22 @@ class SnakeDataset(FlameDataset):
     """
 
     def __init__(self, frame_ids: list[str], threshold_c: float = DEFAULT_THRESHOLD_C,
-                 size: int = NET_SIZE, augment: bool = False, n_points: int = 128):
+                 size: int = NET_SIZE, augment: bool = False, n_points: int = 128,
+                 aug_mode: str = "light"):
         usable = [f for f in frame_ids if _has_fire(f, threshold_c)]
-        super().__init__(usable, threshold_c, size, augment)
+        super().__init__(usable, threshold_c, size, augment, aug_mode=aug_mode)
         self.n_points = n_points
 
     def __getitem__(self, i: int) -> dict:
         rgb, mask = self._load_resized(self.frame_ids[i])
-        if self.augment and np.random.rand() < 0.5:
-            rgb, mask = rgb[:, ::-1].copy(), mask[:, ::-1].copy()
-
+        if self.augment:
+            if self.aug_mode in ("medium", "strong"):
+                from flame.deep import augment as A
+                fn = A.strong_augment if self.aug_mode == "strong" else A.medium_augment
+                rgb, mask = fn(rgb, mask)
+            elif np.random.rand() < 0.5:
+                rgb, mask = rgb[:, ::-1].copy(), mask[:, ::-1].copy()
+        # GT contour is recomputed from the (possibly augmented) mask, so it tracks.
         contour = outer_contour(largest_component_mask(mask))
         ang = np.linspace(0, 2 * np.pi, self.n_points, endpoint=False)
         unit = np.stack([np.cos(ang), np.sin(ang)], axis=1)
