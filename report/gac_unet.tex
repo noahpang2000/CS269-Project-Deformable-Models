@@ -1,0 +1,120 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\captionsetup{font=small}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-2.5em}U-Net--Initialized GAC: Testing the Two-Stage Hybrid\\
+\large Does a classical level set seeded by a real detector beat the detector's own boundary?}
+\author{CS269 Project --- Deformable Models}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\section{Question}
+
+The boundary-metrics report closed with an explicit, untested conjecture: the
+two-stage pipeline ``U-Net to detect, GAC oracle-style to refine boundary'' was
+a no-op on IoU when it was first tried, but \emph{might} win on \emph{boundary}
+metrics, because oracle-initialized GAC placed edges more accurately than the
+per-pixel U-Net even when its IoU was worse. This mini report runs that exact
+pipeline and scores it on the same boundary suite.
+
+\paragraph{Method (\texttt{gac\_unet}).} For each test frame: the trained U-Net
+(\texttt{models/unet.pt} on FLAME-3, \texttt{models/flame1\_unet.pt} on FLAME-1)
+predicts a 0/255 mask; that mask seeds \texttt{morphological\_geodesic\_active\_contour}
+via \texttt{run\_gac(frame, GACConfig())}. The \emph{only} change versus the
+\texttt{gac\_oracle} row is the initialization source: a real detector's
+prediction instead of the ground-truth mask. GAC's edge feature
+(\texttt{inverse\_gaussian\_gradient} of the R$-$G fire energy) and all
+hyperparameters are unchanged, so the experiment isolates the init source. The
+method is scored on the same deep test split (94 FLAME-3 / 301 FLAME-1 frames)
+as the \texttt{unet} row, making the U-Net-vs-\texttt{gac\_unet} delta a clean
+apples-to-apples comparison. When the U-Net predicts nothing, the level set has
+no seed and the prediction is empty (scored like any other empty mask).
+
+\section{Results}
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{llrrrrrrr}
+\toprule
+Dataset & Method & n & IoU & Dice & BF\,@2 & AvgSurf & PolyChf & PolyHaus \\
+& & & & & & (px) & (px) & (px) \\
+\midrule
+FLAME-3 & GAC (oracle)   & 592 & \textbf{0.365} & \textbf{0.499} & \textbf{0.409} & \textbf{16.5} & \textbf{17.3} & \textbf{131} \\
+FLAME-3 & U-Net          & 94  & 0.147 & 0.207 & \textbf{0.157} & 54.9 & 53.5 & 204 \\
+FLAME-3 & \texttt{gac\_unet} & 94  & 0.150 & 0.211 & 0.139 & 48.1 & 48.7 & 206 \\
+FLAME-3 & DALS           & 94  & 0.122 & 0.182 & 0.131 & 48.9 & 47.1 & 194 \\
+\midrule
+FLAME-1 & U-Net          & 301  & \textbf{0.772} & \textbf{0.870} & \textbf{0.757} & 4.60 & 6.53 & 141 \\
+FLAME-1 & DALS           & 301  & 0.747 & 0.854 & 0.685 & 7.73 & 8.12 & 212 \\
+FLAME-1 & \texttt{gac\_unet} & 301  & 0.646 & 0.784 & 0.507 & 6.43 & 7.62 & 151 \\
+FLAME-1 & GAC (oracle)   & 2001 & 0.592 & 0.738 & 0.635 & \textbf{2.92} & \textbf{4.16} & \textbf{71} \\
+\bottomrule
+\end{tabular}
+\caption{\texttt{gac\_unet} against its natural comparators. Higher is better
+for IoU/Dice/BF; lower is better for the distance columns (AvgSurf, PolyChamfer,
+PolyHausdorff, all px). Bold = best in column on that dataset. \texttt{gac\_unet}
+and \texttt{unet} share the same test split (94/301); \texttt{gac\_oracle} is the
+full classical sweep (592/2001) and is included for reference only---its mean is
+over a different denominator.}
+\label{tab:gacunet}
+\end{table}
+
+\section{Verdict: the conjecture fails}
+
+The boundary report's hypothesis is \textbf{not} supported once GAC is seeded by
+a real detector rather than the oracle. The boundary advantage it reported
+belonged to the \emph{oracle} initialization, and it does not survive the
+substitution.
+
+\paragraph{FLAME-3: near-wash, a sliver of boundary gain.} The original
+``no-op on IoU'' holds (0.147 $\to$ 0.150). GAC \emph{does} pull the U-Net
+boundary modestly toward the GT---AvgSurf $54.9\to48.1$\,px, PolyChamfer
+$53.5\to48.7$\,px ($\sim$10\% better)---but BF\,@2px actually \emph{drops}
+($0.157\to0.139$), and every number remains far from oracle-GAC's
+$16.5$/$17.3$\,px. The U-Net's seed on this hidden-thermal-fire task is too
+sparse and too often wrong for the R$-$G energy to refine into a good boundary.
+A small, equivocal improvement, not the predicted win.
+
+\paragraph{FLAME-1: a clear regression.} On visible flame, seeding GAC with the
+U-Net \emph{degrades every metric} relative to the U-Net alone---region
+\emph{and} boundary: IoU $0.772\to0.646$, AvgSurf $4.60\to6.43$\,px, PolyChamfer
+$6.53\to7.62$\,px. The classical edge energy drags the already-accurate U-Net
+boundary \emph{off} the true flame edge. The clean ``deformable model tracks
+edges better'' result from the boundary report was entirely an artifact of the
+oracle (GT) seed: oracle-GAC's PolyChamfer is $4.16$\,px, but \texttt{gac\_unet}'s
+is $7.62$\,px---worse than U-Net's $6.53$.
+
+\paragraph{Takeaway.} The proposed two-stage hybrid does not beat the U-Net's own
+boundary. GAC's edge-localization strength in this project is inseparable from
+knowing the fire's location in advance (the oracle). Handed a real detector's
+output, the classical level set has nothing better than R$-$G redness to lock
+onto, so on the hidden-fire task it barely moves the boundary, and on the
+visible-flame task it makes a good boundary worse. If a boundary-accurate fire
+segmenter is the goal, the productive direction is a detector with an explicit
+edge-aware objective (e.g.\ DALS's trained level set, or a boundary loss on the
+U-Net)---not a classical refinement step bolted on after detection.
+
+\section{Reproducing}
+
+\begin{verbatim}
+python make_boundary_table.py   # gac_unet rows now included for both datasets
+\end{verbatim}
+
+Per-frame CSVs: \texttt{results/gac\_unet\_boundary\_per\_frame.csv} (FLAME-3, 94)
+and \texttt{results/flame1\_gac\_unet\_boundary\_per\_frame.csv} (FLAME-1, 301);
+summary rows in \texttt{results/boundary\_summary.csv}. Wiring:
+\texttt{predict\_gac\_unet} in \texttt{make\_boundary\_table.py};
+\texttt{flame/unet\_seed.py} generalized to select the per-dataset checkpoint.
+
+\end{document}
