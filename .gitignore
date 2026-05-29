@@ -5,6 +5,14 @@ data/
 # Ignore local agent memory state
 memories.json
 
+# LaTeX build artifacts (we commit .tex and .pdf, not the intermediates)
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # Ignore PyTorch model weight saves
 *.pt
 *.pth

@@ -19,13 +19,17 @@ from pathlib import Path
 
 import numpy as np
 
-from flame.data import DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
+from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
 from flame.baselines import DEFAULT_TAU, color_threshold_mask
 from flame.metrics import dice, iou
 from flame.kass import KassConfig, run_kass
 from flame.gac import GACConfig, run_gac
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+
+def _prefix(dataset: str) -> str:
+    return "" if dataset == "flame3" else f"{dataset}_"
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,10 +44,21 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--energy-mode", default="rg", choices=["rg", "thermal"])
     ap.add_argument("--color-tau", type=float, default=DEFAULT_TAU,
                     help="R-G threshold for the color floor / color init (default 0.15)")
-    ap.add_argument("--threshold-c", type=float, default=DEFAULT_THRESHOLD_C)
+    ap.add_argument("--threshold-c", type=float, default=DEFAULT_THRESHOLD_C,
+                    help="GT thermal threshold (FLAME-3 only; ignored for FLAME-1)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--frames", nargs="+", default=None)
-    return ap.parse_args()
+    ap.add_argument("--dataset", choices=["flame3", "flame1"], default=DEFAULT_DATASET,
+                    help="flame3 = RGB+thermal GT (>=150C); flame1 = RGB+hand-labeled "
+                         "visible-flame masks. Output CSVs for flame1 are prefixed "
+                         "'flame1_' so FLAME-3 results are never overwritten.")
+    ap.add_argument("--max-side", dest="max_side", type=int, default=None,
+                    help="Cap working resolution (max(H,W)). Default: None for FLAME-3, "
+                         "768 for FLAME-1 (native 3840x2160 makes Kass take ~18s/frame).")
+    args = ap.parse_args()
+    if args.dataset == "flame1" and args.max_side is None:
+        args.max_side = 768
+    return args
 
 
 def seed_mask(frame, args) -> np.ndarray | None:
@@ -65,22 +80,35 @@ def predict(name: str, frame, args, cfg_kass, cfg_gac) -> np.ndarray:
 
 
 def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> None:
+    if args.energy_mode == "thermal" and args.dataset != "flame3":
+        raise ValueError("--energy-mode thermal requires --dataset flame3")
     cfg_kass = KassConfig(energy_mode=args.energy_mode)
     cfg_gac = GACConfig(energy_mode=args.energy_mode)
     init_desc = "" if name == "color" else f", init={args.init}"
-    print(f"\n=== {name.upper()}  (energy={args.energy_mode}{init_desc}, "
-          f"GT threshold>={args.threshold_c:g}C) ===")
+    gt_desc = (f"GT threshold>={args.threshold_c:g}C"
+               if args.dataset == "flame3" else "GT hand-labeled")
+    print(f"\n=== {_prefix(args.dataset)}{name.upper()}  (energy={args.energy_mode}"
+          f"{init_desc}, {gt_desc}) ===")
 
     rows: list[dict] = []
     skipped_empty = 0
+    skipped_errors: list[tuple[str, str]] = []
     for i, fid in enumerate(frame_ids, 1):
-        frame = load_frame(fid, threshold_c=args.threshold_c)
-        if frame.gt_mask.max() == 0:
-            skipped_empty += 1
+        try:
+            frame = load_frame(fid, threshold_c=args.threshold_c, dataset=args.dataset,
+                               max_side=args.max_side)
+            if frame.gt_mask.max() == 0:
+                skipped_empty += 1
+                continue
+            t0 = time.perf_counter()
+            pred = predict(name, frame, args, cfg_kass, cfg_gac)
+            latency = time.perf_counter() - t0
+        except Exception as e:
+            # Transient scipy/skimage import races have killed full sweeps mid-run;
+            # one frame failing shouldn't lose the other 2000. Log and continue.
+            skipped_errors.append((fid, f"{type(e).__name__}: {e}"))
+            print(f"  WARN {fid}: {type(e).__name__}: {e}")
             continue
-        t0 = time.perf_counter()
-        pred = predict(name, frame, args, cfg_kass, cfg_gac)
-        latency = time.perf_counter() - t0
         rows.append({
             "frame": fid,
             "iou": iou(pred, frame.gt_mask),
@@ -99,13 +127,14 @@ def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> Non
     ious = np.array([r["iou"] for r in rows])
     dices = np.array([r["dice"] for r in rows])
     lat = np.array([r["latency_s"] for r in rows])
-    print(f"  scored frames : {len(rows)}  (skipped {skipped_empty} empty-GT)")
+    err_note = f", {len(skipped_errors)} errors" if skipped_errors else ""
+    print(f"  scored frames : {len(rows)}  (skipped {skipped_empty} empty-GT{err_note})")
     print(f"  IoU   mean={ious.mean():.4f}  median={np.median(ious):.4f}  std={ious.std():.4f}")
     print(f"  Dice  mean={dices.mean():.4f}  median={np.median(dices):.4f}  std={dices.std():.4f}")
     print(f"  latency median={np.median(lat):.3f} s/frame")
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    out_csv = RESULTS_DIR / f"{name}_per_frame.csv"
+    out_csv = RESULTS_DIR / f"{_prefix(args.dataset)}{name}_per_frame.csv"
     with out_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -115,7 +144,7 @@ def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> Non
 
 def main() -> None:
     args = parse_args()
-    frame_ids = args.frames if args.frames else list_frame_ids()
+    frame_ids = args.frames if args.frames else list_frame_ids(dataset=args.dataset)
     if args.frames is None and args.limit is not None:
         frame_ids = frame_ids[: args.limit]
     print(f"Frames to process: {len(frame_ids)}")

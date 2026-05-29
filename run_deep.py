@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from flame.data import DEFAULT_THRESHOLD_C, load_frame
+from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
 from flame.contour_utils import polygon_to_mask
 from flame.metrics import dice, iou
 from flame.splits import make_splits
@@ -43,6 +43,15 @@ MODELS_DIR = ROOT / "models"
 RESULTS_DIR = ROOT / "results"
 N_POINTS = 128
 MIN_CC_PX = 30
+
+
+def _prefix(dataset: str) -> str:
+    """Filename prefix to keep FLAME-1 checkpoints/CSVs from clobbering FLAME-3.
+
+    FLAME-3 ('') preserves the existing names (back-compat with prior results);
+    every other dataset gets '<dataset>_'.
+    """
+    return "" if dataset == "flame3" else f"{dataset}_"
 
 
 def build_model(method: str, in_ch: int = 3) -> torch.nn.Module:
@@ -103,11 +112,13 @@ def predict_native(method: str, model, frame, size: int, device,
 
 def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
                    size: int, device, write_csv: bool = False, tag: str = "",
-                   in_channels: str = "rgb") -> dict:
+                   in_channels: str = "rgb", dataset: str = DEFAULT_DATASET,
+                   eval_max_side: int | None = None) -> dict:
     model.eval()
     rows = []
     for fid in frame_ids:
-        frame = load_frame(fid, threshold_c=threshold_c)
+        frame = load_frame(fid, threshold_c=threshold_c, dataset=dataset,
+                           max_side=eval_max_side)
         t0 = time.perf_counter()
         pred = predict_native(method, model, frame, size, device, in_channels)
         latency = time.perf_counter() - t0
@@ -123,7 +134,7 @@ def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
     dices = np.array([r["dice"] for r in rows])
     if write_csv:
         RESULTS_DIR.mkdir(exist_ok=True)
-        out = RESULTS_DIR / f"{method}{tag}_per_frame.csv"
+        out = RESULTS_DIR / f"{_prefix(dataset)}{method}{tag}_per_frame.csv"
         with out.open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
@@ -154,8 +165,10 @@ def compute_loss(method: str, model, batch, device, loss: str = "bce_dice") -> t
 
 
 def train(method: str, args) -> None:
+    if method == "thermal" and args.dataset != "flame3":
+        raise ValueError("--method thermal requires --dataset flame3 (no thermal channel on FLAME-1)")
     device = torch.device(args.device)
-    splits = make_splits(exclude_occluded=args.exclude_occluded)
+    splits = make_splits(exclude_occluded=args.exclude_occluded, dataset=args.dataset)
     train_ids, val_ids = splits["train"], splits["val"]
     if args.limit:
         train_ids, val_ids = train_ids[: args.limit], val_ids[: max(1, args.limit // 4)]
@@ -165,22 +178,25 @@ def train(method: str, args) -> None:
     in_ch = SPEC_CHANNELS[spec]
     ds_cls = {"deep_snake": SnakeDataset, "thermal": ThermalDataset}.get(method, FlameDataset)
     if ds_cls is FlameDataset:
-        ds_kwargs = {"in_channels": spec, "aug_mode": args.augment}
+        ds_kwargs = {"in_channels": spec, "aug_mode": args.augment, "dataset": args.dataset,
+                     "load_max_side": args.load_max_side}
     elif ds_cls is SnakeDataset:
-        ds_kwargs = {"aug_mode": args.augment}   # SnakeDataset honours aug_mode, not in_channels
+        ds_kwargs = {"aug_mode": args.augment, "dataset": args.dataset,
+                     "load_max_side": args.load_max_side}
     else:
-        ds_kwargs = {}                            # ThermalDataset: light aug only
+        ds_kwargs = {"dataset": args.dataset}    # ThermalDataset: light aug only
     train_ds = ds_cls(train_ids, threshold_c=args.threshold_c, size=args.size,
                       augment=True, **ds_kwargs)
     loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    print(f"{method}: {len(train_ds)} train frames, {len(val_ids)} val frames, device={device}")
+    print(f"{method}: {len(train_ds)} train frames, {len(val_ids)} val frames, "
+          f"dataset={args.dataset}, device={device}")
 
     model = build_model(method, in_ch=in_ch).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     best_iou = -1.0
     MODELS_DIR.mkdir(exist_ok=True)
-    ckpt = MODELS_DIR / f"{method}{args.tag}.pt"
+    ckpt = MODELS_DIR / f"{_prefix(args.dataset)}{method}{args.tag}.pt"
     print(f"  loss={args.loss}  in_channels={spec}({in_ch})  checkpoint={ckpt.name}")
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -192,7 +208,8 @@ def train(method: str, args) -> None:
             opt.step()
             running += loss.item()
         val = evaluate_split(method, model, val_ids, args.threshold_c, args.size, device,
-                             in_channels=spec)
+                             in_channels=spec, dataset=args.dataset,
+                             eval_max_side=args.eval_max_side)
         print(f"  epoch {epoch:3d}  loss={running / max(len(loader), 1):.4f}  "
               f"val IoU={val['iou']:.4f}  Dice={val['dice']:.4f}")
         if val["iou"] > best_iou:
@@ -203,19 +220,21 @@ def train(method: str, args) -> None:
 
 def run_eval(method: str, args) -> None:
     device = torch.device(args.device)
-    ckpt = MODELS_DIR / f"{method}{args.tag}.pt"
+    ckpt = MODELS_DIR / f"{_prefix(args.dataset)}{method}{args.tag}.pt"
     if not ckpt.exists():
         raise FileNotFoundError(f"No checkpoint at {ckpt}; train first.")
     spec = args.in_channels if method == "unet" else "rgb"
     model = build_model(method, in_ch=SPEC_CHANNELS[spec]).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
-    test_ids = make_splits(exclude_occluded=args.exclude_occluded)["test"]
+    test_ids = make_splits(exclude_occluded=args.exclude_occluded,
+                           dataset=args.dataset)["test"]
     if args.limit:
         test_ids = test_ids[: args.limit]
-    print(f"=== {method.upper()}{args.tag}  eval on {len(test_ids)} test frames "
-          f"(in_channels={spec}) ===")
+    print(f"=== {_prefix(args.dataset)}{method.upper()}{args.tag}  "
+          f"eval on {len(test_ids)} test frames (in_channels={spec}) ===")
     summary = evaluate_split(method, model, test_ids, args.threshold_c, args.size,
-                             device, write_csv=True, tag=args.tag, in_channels=spec)
+                             device, write_csv=True, tag=args.tag, in_channels=spec,
+                             dataset=args.dataset, eval_max_side=args.eval_max_side)
     print(f"  test IoU mean={summary['iou']:.4f}  Dice mean={summary['dice']:.4f}")
 
 
@@ -244,8 +263,25 @@ def parse_args() -> argparse.Namespace:
                          "brightness/contrast (no hue); strong = aggressive geo+photometric")
     ap.add_argument("--exclude-occluded", dest="exclude_occluded", action="store_true",
                     help="Drop full-frame-smoke (>=0.95) frames from train/val/test "
-                         "as degenerate, unsolvable inputs")
-    return ap.parse_args()
+                         "as degenerate, unsolvable inputs (FLAME-3 only)")
+    ap.add_argument("--dataset", choices=["flame3", "flame1"], default=DEFAULT_DATASET,
+                    help="flame3 = RGB+thermal GT (>=150C); flame1 = RGB+hand-labeled "
+                         "visible-flame masks (no thermal). Output files for flame1 are "
+                         "prefixed 'flame1_' so FLAME-3 results are never overwritten.")
+    ap.add_argument("--load-max-side", dest="load_max_side", type=int, default=None,
+                    help="Cap load-time max(H,W) before the NET_SIZE crop. Use ~1024 on "
+                         "FLAME-1 (native 3840x2160) to skip a 33MP decode per sample.")
+    ap.add_argument("--eval-max-side", dest="eval_max_side", type=int, default=None,
+                    help="Cap eval scoring resolution (max(H,W) of GT mask). "
+                         "Use ~1024 on FLAME-1 to keep eval tractable.")
+    args = ap.parse_args()
+    # Sensible FLAME-1 defaults so users don't accidentally run at 3840x2160.
+    if args.dataset == "flame1":
+        if args.load_max_side is None:
+            args.load_max_side = 1024
+        if args.eval_max_side is None:
+            args.eval_max_side = 1024
+    return args
 
 
 def main() -> None:

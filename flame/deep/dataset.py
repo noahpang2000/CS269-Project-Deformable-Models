@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from flame.data import DEFAULT_THRESHOLD_C, load_frame
+from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
 from flame.contour_utils import (
     largest_component_mask,
     outer_contour,
@@ -20,8 +20,8 @@ from flame.contour_utils import (
 NET_SIZE = 512
 
 
-def _has_fire(fid: str, threshold_c: float) -> bool:
-    return load_frame(fid, threshold_c=threshold_c).gt_mask.max() > 0
+def _has_fire(fid: str, threshold_c: float, dataset: str = DEFAULT_DATASET) -> bool:
+    return load_frame(fid, threshold_c=threshold_c, dataset=dataset).gt_mask.max() > 0
 
 
 class FlameDataset(Dataset):
@@ -29,19 +29,25 @@ class FlameDataset(Dataset):
 
     def __init__(self, frame_ids: list[str], threshold_c: float = DEFAULT_THRESHOLD_C,
                  size: int = NET_SIZE, augment: bool = False, in_channels: str = "rgb",
-                 aug_mode: str = "light"):
+                 aug_mode: str = "light", dataset: str = DEFAULT_DATASET,
+                 load_max_side: int | None = None):
         self.frame_ids = frame_ids
         self.threshold_c = threshold_c
         self.size = size
         self.augment = augment
         self.in_channels = in_channels
         self.aug_mode = aug_mode  # "light" (flip only) or "strong" (flip/rot/scale/photometric)
+        self.dataset = dataset
+        # load_max_side: cap load-time resolution before the NET_SIZE crop. Lets
+        # FLAME-1 (3840x2160) skip a 33MP decode+resize per training sample.
+        self.load_max_side = load_max_side
 
     def __len__(self) -> int:
         return len(self.frame_ids)
 
     def _load_resized(self, fid: str):
-        f = load_frame(fid, threshold_c=self.threshold_c)
+        f = load_frame(fid, threshold_c=self.threshold_c, dataset=self.dataset,
+                       max_side=self.load_max_side)
         rgb = cv2.resize(f.rgb, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
         mask = cv2.resize(f.gt_mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
         return rgb, mask
@@ -94,9 +100,11 @@ class SnakeDataset(FlameDataset):
 
     def __init__(self, frame_ids: list[str], threshold_c: float = DEFAULT_THRESHOLD_C,
                  size: int = NET_SIZE, augment: bool = False, n_points: int = 128,
-                 aug_mode: str = "light"):
-        usable = [f for f in frame_ids if _has_fire(f, threshold_c)]
-        super().__init__(usable, threshold_c, size, augment, aug_mode=aug_mode)
+                 aug_mode: str = "light", dataset: str = DEFAULT_DATASET,
+                 load_max_side: int | None = None):
+        usable = [f for f in frame_ids if _has_fire(f, threshold_c, dataset)]
+        super().__init__(usable, threshold_c, size, augment, aug_mode=aug_mode,
+                         dataset=dataset, load_max_side=load_max_side)
         self.n_points = n_points
 
     def __getitem__(self, i: int) -> dict:
