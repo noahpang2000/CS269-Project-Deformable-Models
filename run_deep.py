@@ -29,7 +29,7 @@ from flame.metrics import dice, iou
 from flame.splits import make_splits
 from flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset, ThermalDataset
 from flame.deep.losses import (
-    bce_dice, bce_focal_tversky, bce_focal_tversky_p, cyclic_contour_loss,
+    bce_dice, bce_focal_tversky_p, cyclic_contour_loss,
     dice_loss, focal_tversky, weighted_thermal_loss,
 )
 from flame.deep.unet import UNet
