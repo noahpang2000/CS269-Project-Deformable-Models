@@ -57,3 +57,57 @@ def parse_args() -> argparse.Namespace:
                     help="Retrain the winning config at --full-epochs and eval test")
     ap.add_argument("--full-epochs", dest="full_epochs", type=int, default=50)
     return ap.parse_args()
+
+
+import torch
+from torch.utils.data import DataLoader
+
+from flame.deep.dataset import NET_SIZE, FlameDataset
+from flame.deep.val_metrics import val_iou_and_bf
+from flame.data import DEFAULT_THRESHOLD_C
+from flame.splits import make_splits
+from run_deep import build_model, compute_loss
+
+THRESHOLD_C = DEFAULT_THRESHOLD_C
+
+
+def _eval_max_side(dataset: str) -> int | None:
+    return 1024 if dataset == "flame1" else None
+
+
+def _load_max_side(dataset: str) -> int | None:
+    return 1024 if dataset == "flame1" else None
+
+
+def run_trial(cfg: dict, dataset: str, epochs: int, device,
+              limit: int | None, val_limit: int | None) -> dict:
+    """Train DALS with cfg for `epochs`, return cfg + final val IoU/BF."""
+    splits = make_splits(dataset=dataset)
+    train_ids, val_ids = splits["train"], splits["val"]
+    if limit:
+        train_ids = train_ids[:limit]
+    if val_limit:
+        val_ids = val_ids[:val_limit]
+
+    ds = FlameDataset(train_ids, threshold_c=THRESHOLD_C, size=NET_SIZE,
+                      augment=True, in_channels="rgb", aug_mode="light",
+                      dataset=dataset, load_max_side=_load_max_side(dataset))
+    loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
+
+    dals_cfg = {k: cfg[k] for k in ("n_iter", "mu", "lam1", "lam2", "dt")}
+    model = build_model("dals", dals_cfg=dals_cfg).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    ft = {"alpha": cfg["ft_alpha"], "beta": cfg["ft_beta"], "gamma": cfg["ft_gamma"]}
+
+    for _ in range(epochs):
+        model.train()
+        for batch in loader:
+            opt.zero_grad()
+            loss = compute_loss("dals", model, batch, device, cfg["loss"], ft=ft)
+            loss.backward()
+            opt.step()
+
+    val_iou, val_bf = val_iou_and_bf("dals", model, val_ids, THRESHOLD_C, NET_SIZE,
+                                     device, dataset=dataset,
+                                     eval_max_side=_eval_max_side(dataset))
+    return {**cfg, "val_iou": round(val_iou, 4), "val_bf": round(val_bf, 4)}
