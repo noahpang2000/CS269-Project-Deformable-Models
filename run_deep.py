@@ -29,8 +29,8 @@ from flame.metrics import dice, iou
 from flame.splits import make_splits
 from flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset, ThermalDataset
 from flame.deep.losses import (
-    bce_dice, bce_focal_tversky, cyclic_contour_loss, dice_loss, focal_tversky,
-    weighted_thermal_loss,
+    bce_dice, bce_focal_tversky, bce_focal_tversky_p, cyclic_contour_loss,
+    dice_loss, focal_tversky, weighted_thermal_loss,
 )
 from flame.deep.unet import UNet
 from flame.deep.dals import DALS
@@ -54,10 +54,16 @@ def _prefix(dataset: str) -> str:
     return "" if dataset == "flame3" else f"{dataset}_"
 
 
-def build_model(method: str, in_ch: int = 3) -> torch.nn.Module:
+def build_model(method: str, in_ch: int = 3,
+                dals_cfg: dict | None = None) -> torch.nn.Module:
     if method == "unet":
         return UNet(in_ch=in_ch)
-    return {"dals": DALS, "deep_snake": DeepSnake, "thermal": ThermalRegUNet}[method]()
+    if method == "dals":
+        cfg = dals_cfg or {}
+        return DALS(n_iter=cfg.get("n_iter", 5), mu=cfg.get("mu", 0.2),
+                    lam1=cfg.get("lam1", 1.0), lam2=cfg.get("lam2", 1.0),
+                    dt=cfg.get("dt", 0.1))
+    return {"deep_snake": DeepSnake, "thermal": ThermalRegUNet}[method]()
 
 
 def image_tensor(rgb: np.ndarray, size: int, device, in_channels: str = "rgb") -> torch.Tensor:
@@ -143,8 +149,15 @@ def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
     return {"iou": float(ious.mean()), "dice": float(dices.mean()), "n": len(rows)}
 
 
-def compute_loss(method: str, model, batch, device, loss: str = "bce_dice") -> torch.Tensor:
-    seg = bce_focal_tversky if loss == "focal_tversky" else bce_dice
+def compute_loss(method: str, model, batch, device, loss: str = "bce_dice",
+                 ft: dict | None = None) -> torch.Tensor:
+    ft = ft or {}
+    if loss == "focal_tversky":
+        def seg(lg, tg):
+            return bce_focal_tversky_p(lg, tg, alpha=ft.get("alpha", 0.3),
+                                       beta=ft.get("beta", 0.7), gamma=ft.get("gamma", 0.75))
+    else:
+        seg = bce_dice
     image = batch["image"].to(device)
     mask = batch["mask"].to(device)
     if method == "thermal":
@@ -154,7 +167,9 @@ def compute_loss(method: str, model, batch, device, loss: str = "bce_dice") -> t
         return seg(model(image), mask)
     if method == "dals":
         phi, prob_logits = model(image)
-        phi_loss = focal_tversky(phi, mask) if loss == "focal_tversky" else dice_loss(phi, mask)
+        phi_loss = (focal_tversky(phi, mask, alpha=ft.get("alpha", 0.3),
+                                  beta=ft.get("beta", 0.7), gamma=ft.get("gamma", 0.75))
+                    if loss == "focal_tversky" else dice_loss(phi, mask))
         return phi_loss + seg(prob_logits, mask)
     coarse, contours = model(image, batch["init_contour"].to(device))
     gt = batch["gt_contour"].to(device)
@@ -191,7 +206,9 @@ def train(method: str, args) -> None:
     print(f"{method}: {len(train_ds)} train frames, {len(val_ids)} val frames, "
           f"dataset={args.dataset}, device={device}")
 
-    model = build_model(method, in_ch=in_ch).to(device)
+    dals_cfg = {"n_iter": args.n_iter, "mu": args.mu, "lam1": args.lam1,
+                "lam2": args.lam2, "dt": args.dt}
+    model = build_model(method, in_ch=in_ch, dals_cfg=dals_cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     best_iou = -1.0
@@ -203,7 +220,8 @@ def train(method: str, args) -> None:
         running = 0.0
         for batch in loader:
             opt.zero_grad()
-            loss = compute_loss(method, model, batch, device, args.loss)
+            ft = {"alpha": args.ft_alpha, "beta": args.ft_beta, "gamma": args.ft_gamma}
+            loss = compute_loss(method, model, batch, device, args.loss, ft=ft)
             loss.backward()
             opt.step()
             running += loss.item()
@@ -224,7 +242,9 @@ def run_eval(method: str, args) -> None:
     if not ckpt.exists():
         raise FileNotFoundError(f"No checkpoint at {ckpt}; train first.")
     spec = args.in_channels if method == "unet" else "rgb"
-    model = build_model(method, in_ch=SPEC_CHANNELS[spec]).to(device)
+    dals_cfg = {"n_iter": args.n_iter, "mu": args.mu, "lam1": args.lam1,
+                "lam2": args.lam2, "dt": args.dt}
+    model = build_model(method, in_ch=SPEC_CHANNELS[spec], dals_cfg=dals_cfg).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
     test_ids = make_splits(exclude_occluded=args.exclude_occluded,
                            dataset=args.dataset)["test"]
@@ -252,6 +272,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--limit", type=int, default=None, help="Subset frames for a quick run")
     ap.add_argument("--loss", choices=["bce_dice", "focal_tversky"], default="bce_dice",
                     help="Segmentation loss for unet/dals (deep_snake unaffected)")
+    ap.add_argument("--n-iter", dest="n_iter", type=int, default=5,
+                    help="DALS Chan-Vese unroll steps (dals only)")
+    ap.add_argument("--mu", type=float, default=0.2, help="DALS init curvature weight")
+    ap.add_argument("--lam1", type=float, default=1.0, help="DALS init inside-region weight")
+    ap.add_argument("--lam2", type=float, default=1.0, help="DALS init outside-region weight")
+    ap.add_argument("--dt", type=float, default=0.1, help="DALS init level-set time step")
+    ap.add_argument("--ft-alpha", dest="ft_alpha", type=float, default=0.3,
+                    help="Focal-Tversky alpha (FP weight), used when --loss focal_tversky")
+    ap.add_argument("--ft-beta", dest="ft_beta", type=float, default=0.7,
+                    help="Focal-Tversky beta (FN weight)")
+    ap.add_argument("--ft-gamma", dest="ft_gamma", type=float, default=0.75,
+                    help="Focal-Tversky focusing exponent")
     ap.add_argument("--tag", default="",
                     help="Suffix for checkpoint/CSV names so variants don't overwrite "
                          "the baseline, e.g. --tag _ft")
