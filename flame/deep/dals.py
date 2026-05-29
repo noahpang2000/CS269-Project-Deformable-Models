@@ -40,14 +40,16 @@ def _curvature(phi: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 
 class DALS(nn.Module):
-    def __init__(self, n_iter: int = 5, base: int = 32):
+    def __init__(self, n_iter: int = 5, base: int = 32,
+                 mu: float = 0.2, lam1: float = 1.0,
+                 lam2: float = 1.0, dt: float = 0.1):
         super().__init__()
         self.trunk = UNet(in_ch=3, out_ch=1, base=base)
         self.n_iter = n_iter
-        self.mu = nn.Parameter(torch.tensor(0.2))
-        self.lam1 = nn.Parameter(torch.tensor(1.0))
-        self.lam2 = nn.Parameter(torch.tensor(1.0))
-        self.dt = nn.Parameter(torch.tensor(0.1))
+        self.mu = nn.Parameter(torch.tensor(float(mu)))
+        self.lam1 = nn.Parameter(torch.tensor(float(lam1)))
+        self.lam2 = nn.Parameter(torch.tensor(float(lam2)))
+        self.dt = nn.Parameter(torch.tensor(float(dt)))
 
     def forward(self, x):
         phi = self.trunk(x)                       # initial level set (logits)
