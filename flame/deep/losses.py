@@ -67,3 +67,11 @@ def cyclic_contour_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         cost = F.smooth_l1_loss(pred, shifted, reduction="none").mean(dim=(1, 2))
         best = cost if best is None else torch.minimum(best, cost)
     return best.mean()
+
+
+def bce_focal_tversky_p(logits: torch.Tensor, target: torch.Tensor,
+                        alpha: float = 0.3, beta: float = 0.7,
+                        gamma: float = 0.75) -> torch.Tensor:
+    """bce_focal_tversky with explicit Tversky params (for hyperparam search)."""
+    return F.binary_cross_entropy_with_logits(logits, target) + \
+        focal_tversky(logits, target, alpha=alpha, beta=beta, gamma=gamma)
