@@ -1,6 +1,10 @@
 # Ignore data
 data/
+images/
 *.zip
+
+# Ignore mmdetection repository
+flame/deep/mmdetection/
 
 # Ignore PyTorch model weight saves
 *.pt
