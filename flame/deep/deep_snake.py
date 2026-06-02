@@ -11,7 +11,10 @@ class CircConv(nn.Module):
         self.conv = nn.Conv1d(cin, cout, k)
 
     def forward(self, x):
-        x = torch.cat([x[..., -self.pad:], x, x[..., :self.pad]], dim=-1)
+        # NB: with k=1 the pad is 0, and x[..., -0:] would return the WHOLE
+        # tensor (not empty), tripling the vertex dim. Guard the pad=0 case.
+        if self.pad > 0:
+            x = torch.cat([x[..., -self.pad:], x, x[..., :self.pad]], dim=-1)
         return self.conv(x)
 
 class CircResBlock(nn.Module):
@@ -103,41 +106,54 @@ class DeepSnakePaper(nn.Module):
     Decoupled DeepSnake. It no longer owns the U-Net. 
     It expects deep features (from CenterNet/Deformable CNN) and a bounding box prior.
     """
-    def __init__(self, feat_dim: int = 64, n_iter: int = 3):
+    def __init__(self, feat_dim: int = 64, n_iter: int = 3, offset_scale: float = 32.0):
         super().__init__()
         self.n_iter = n_iter
+        # The heads emit small (~sub-pixel) raw offsets; scale them to real pixels
+        # so a few iterations can actually deform an ~80px octagon. Without this
+        # the snake moves vertices ~1px and is effectively a no-op.
+        self.offset_scale = offset_scale
         self.snakes = nn.ModuleList([ResidualSnakeHead(feat_dim) for _ in range(n_iter)])
 
-    def _sample(self, feat, contour, size):
-        # size is now [W, H]
-        size_tensor = torch.tensor(size, device=contour.device)
+    @staticmethod
+    def _wh_tensor(image_size, device) -> torch.Tensor:
+        """Normalize image_size (int -> square, or (W, H) tuple) to a [W, H] tensor."""
+        if isinstance(image_size, (int, float)):
+            wh = (float(image_size), float(image_size))
+        else:
+            wh = (float(image_size[0]), float(image_size[1]))
+        return torch.tensor(wh, device=device)
+
+    def _sample(self, feat, contour, size_tensor):
+        # size_tensor: [W, H] on the contour's device
         # Normalizes coordinates to [-1, 1] for grid_sample
         grid = (contour / (size_tensor - 1)) * 2 - 1
         sampled = F.grid_sample(feat, grid.unsqueeze(1), align_corners=True)  # [B, C, 1, N]
         return sampled.squeeze(2)
 
-    def forward(self, features, boxes, image_size: int, n_points: int = 128):
+    def forward(self, features, boxes, image_size, n_points: int = 128):
         """
         features: [B, C, H, W] - High quality features from a backbone
         boxes: [B, 4] - Bounding box coordinates from a detector
+        image_size: int (square) or (W, H) tuple
         """
         # 1. Rule-based geometric prior (replaces U-Net mask)
         contour = get_octagon_from_box(boxes, n_points)
-        
+
         outputs = [contour]
-        size_tensor = torch.tensor(image_size, device=contour.device)
+        size_tensor = self._wh_tensor(image_size, contour.device)
 
         # 2. Iterative Deformation
         for head in self.snakes:
             # Extract features at the current vertex locations
-            verts_feat = self._sample(features, contour, image_size)     # [B, C, N]
-            
+            verts_feat = self._sample(features, contour, size_tensor)    # [B, C, N]
+
             # Normalize contour coordinates for the network
             coords_n = ((contour / (size_tensor - 1)) * 2 - 1).transpose(1, 2) # [B, 2, N]
             
-            # Predict offsets
-            offset = head(verts_feat, coords_n).transpose(1, 2)          # [B, N, 2]
-            
+            # Predict offsets (scaled from the head's small raw output to pixels)
+            offset = head(verts_feat, coords_n).transpose(1, 2) * self.offset_scale  # [B, N, 2]
+
             # Apply deformation
             contour = contour + offset
             outputs.append(contour)
@@ -177,15 +193,29 @@ class DeepSnakePipeline(nn.Module):
         # STEP 2: Extract Bounding Boxes
         # ==========================================
         
-        cls_scores, bbox_preds = self.detector.bbox_head(multi_scale_features)
-            
-        # Decode the raw head predictions into actual image coordinates
-        batch_metas = [{'img_shape': (H, W), 'scale_factor': (1., 1.)} for _ in range(B)]
-        
+        # CenterNet's head (mmdet 3.x) returns THREE prediction lists, not two:
+        # (center_heatmap_preds, wh_preds, offset_preds). predict_by_feat takes
+        # exactly those three and runs decode (+NMS) internally.
+        center_heatmap_preds, wh_preds, offset_preds = \
+            self.detector.bbox_head(multi_scale_features)
+
+        # Decode the raw head predictions into actual image coordinates.
+        # CenterNet's decoder reads 'batch_input_shape', 'border' and
+        # 'scale_factor'. 'border' is the RandomCenterCropPad offset
+        # (top, bottom, left, right); at inference with no crop-pad it is the
+        # full frame, so the predicted boxes map straight back to image coords.
+        batch_metas = [{'img_shape': (H, W),
+                        'batch_input_shape': (H, W),
+                        'border': (0, H, 0, W),
+                        'scale_factor': (1., 1.)} for _ in range(B)]
+
+        # CenterNet dedupes via local-maximum heatmap peaks (topk /
+        # local_maximum_kernel in test_cfg), not box NMS, so with_nms=False.
         results_list = self.detector.bbox_head.predict_by_feat(
-            cls_scores, bbox_preds, 
-            batch_img_metas=batch_metas, 
-            cfg=self.detector.test_cfg
+            center_heatmap_preds, wh_preds, offset_preds,
+            batch_img_metas=batch_metas,
+            rescale=False,
+            with_nms=False,
         )
         
         # ==========================================

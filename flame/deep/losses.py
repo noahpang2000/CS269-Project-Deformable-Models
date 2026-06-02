@@ -28,3 +28,30 @@ def cyclic_contour_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         cost = F.smooth_l1_loss(pred, shifted, reduction="none").mean(dim=(1, 2))
         best = cost if best is None else torch.minimum(best, cost)
     return best.mean()
+
+
+def chamfer_contour_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
+    """Symmetric Chamfer distance between two point sets [B,N,2], [B,M,2].
+
+    For each predicted vertex, distance to the nearest GT point (pred->gt), and
+    for each GT point, distance to the nearest predicted vertex (gt->pred). The
+    gt->pred term is what prevents the contour from collapsing inward: a shrunken
+    prediction leaves GT boundary points uncovered, which costs. Order-invariant,
+    so it complements the vertex-order cyclic L1.
+    """
+    # pairwise squared distances [B, N, M]
+    d2 = torch.cdist(pred, gt) ** 2
+    pred_to_gt = d2.min(dim=2).values.mean(dim=1)   # each pred vertex -> nearest GT
+    gt_to_pred = d2.min(dim=1).values.mean(dim=1)   # each GT point  -> nearest pred (anti-collapse)
+    return (pred_to_gt + gt_to_pred).mean()
+
+
+def snake_contour_loss(pred: torch.Tensor, gt: torch.Tensor,
+                       chamfer_weight: float = 0.01) -> torch.Tensor:
+    """Cyclic L1 (correspondence) + weighted Chamfer (boundary coverage).
+
+    The Chamfer term is in squared pixels, so it is down-weighted to balance the
+    per-coordinate L1 magnitude; it supplies the anti-collapse gradient the L1
+    alone lacks.
+    """
+    return cyclic_contour_loss(pred, gt) + chamfer_weight * chamfer_contour_loss(pred, gt)

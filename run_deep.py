@@ -24,12 +24,12 @@ import torch
 from torch.utils.data import DataLoader
 import torchvision.models as models
 
-from flame.data import DEFAULT_THRESHOLD_C, load_frame
+from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
 from flame.contour_utils import polygon_to_mask
 from flame.metrics import dice, iou
 from flame.splits import make_splits
-from flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset
-from flame.deep.losses import bce_dice, cyclic_contour_loss, dice_loss
+from flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset, PaperSnakeDataset
+from flame.deep.losses import bce_dice, cyclic_contour_loss, dice_loss, snake_contour_loss
 from flame.deep.unet import UNet
 from flame.deep.dals import DALS
 from flame.deep.deep_snake_simplified import DeepSnake
@@ -41,6 +41,15 @@ RESULTS_DIR = ROOT / "results"
 N_POINTS = 128
 MIN_CC_PX = 30
 
+
+def _prefix(dataset: str) -> str:
+    """Checkpoint/CSV filename prefix so FLAME-1 runs don't clobber FLAME-3.
+
+    FLAME-3 ('') keeps the existing unprefixed names (back-compat with the
+    recorded results); FLAME-1 gets 'flame1_'.
+    """
+    return "" if dataset == "flame3" else f"{dataset}_"
+
 class DeepSnakeTrainWrapper(torch.nn.Module):
     """
     A lightweight wrapper strictly for training the Snake head.
@@ -48,16 +57,19 @@ class DeepSnakeTrainWrapper(torch.nn.Module):
     """
     def __init__(self, snake_feat_dim=64):
         super().__init__()
-        # 1. Standard Backbone (ResNet18)
+        # 1. Backbone (ResNet18) truncated at layer1 -> STRIDE 4, 64 channels.
+        # The full backbone (-2) is stride 32: a 512px image -> 16x16 map, so an
+        # ~80px fire box covers ~2 feature cells and all 128 contour vertices
+        # sample (nearly) the same feature -> the snake can't tell vertices apart
+        # and learns ~0 offsets. Stride 4 gives a 128x128 map so vertices around
+        # a blob get distinct features (this is what the Deep Snake paper uses).
         resnet = models.resnet18(pretrained=True)
-        
-        # Strip the classification head and pooling to keep spatial dimensions
-        # Outputs a feature map of shape [B, 512, H/32, W/32]
-        self.backbone = torch.nn.Sequential(*list(resnet.children())[:-2]) 
-        
-        # 2. Channel Reducer (matches the ResNet output to the Snake's expected input)
-        self.reduce = torch.nn.Conv2d(512, snake_feat_dim, kernel_size=1)
-        
+        self.backbone = torch.nn.Sequential(
+            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1)
+
+        # 2. Channel reducer (layer1 outputs 64 channels at stride 4).
+        self.reduce = torch.nn.Conv2d(64, snake_feat_dim, kernel_size=1)
+
         # 3. The decoupled Snake module
         self.snake = DeepSnakePaper(feat_dim=snake_feat_dim)
 
@@ -102,29 +114,29 @@ def _snake_predict(model, x, size, device) -> np.ndarray:
         mask = np.maximum(mask, polygon_to_mask(poly, (size, size)))
     return mask
 
-def _snake_predict_paper(model, frame, size, device) -> np.ndarray:
+def _snake_predict_paper(model, frame, size, device, conf_threshold: float = 0.3) -> np.ndarray:
     """RGB-only Deep Snake inference (Handles both Oracle and System evaluation)."""
     x = image_tensor(frame.rgb, size, device)
-    
+
     # Check which model we are currently running
     if isinstance(model, DeepSnakePipeline):
         # PHASE 2: SYSTEM EVALUATION
         # The pipeline handles MMDet box predictions internally
-        contours, _ = model(x, conf_threshold=0.3) 
+        contours, _ = model(x, conf_threshold=conf_threshold)
     else:
-        # PHASE 1: ORACLE EVALUATION (Training Validation)
-        # We manually extract perfect ground truth boxes from the mask
-        pos = np.where(frame.gt_mask > 0)
-        if len(pos[0]) == 0:
-            return np.zeros((size, size), dtype=np.uint8)
-            
-        ymin, xmin = pos[0].min(), pos[1].min()
-        ymax, xmax = pos[0].max(), pos[1].max()
-        
+        # PHASE 1: ORACLE EVALUATION (per-instance) -- one GT box per fire
+        # connected component, matching how the per-instance snake was trained.
         h, w = frame.gt_mask.shape
-        scale_x, scale_y = size / w, size / h
-        boxes = torch.tensor([[xmin * scale_x, ymin * scale_y, xmax * scale_x, ymax * scale_y]], device=device).float()
-        
+        gt_rs = cv2.resize(frame.gt_mask, (size, size), interpolation=cv2.INTER_NEAREST)
+        num, _, stats, _ = cv2.connectedComponentsWithStats(
+            (gt_rs > 0).astype(np.uint8), connectivity=8)
+        comp_boxes = [[x, y, x + bw, y + bh]
+                      for lbl in range(1, num)
+                      for (x, y, bw, bh, area) in [stats[lbl]]
+                      if area >= MIN_CC_PX]
+        if not comp_boxes:
+            return np.zeros((size, size), dtype=np.uint8)
+        boxes = torch.tensor(comp_boxes, device=device).float()   # [K, 4]
         contours = model(x, boxes, image_size=(size, size))
     
     # Draw the final contours onto the mask
@@ -139,8 +151,53 @@ def _snake_predict_paper(model, frame, size, device) -> np.ndarray:
             
     return mask
 
+def _detector_boxes(pipe, x, conf_threshold: float) -> np.ndarray:
+    """Per-instance fire boxes [K,4] (x0,y0,x1,y1) at network resolution from the
+    pipeline's CenterNet detector (no snake)."""
+    _, _, H, W = x.shape
+    feats = pipe.detector.extract_feat(x)
+    chp, whp, offp = pipe.detector.bbox_head(feats)
+    res = pipe.detector.bbox_head.predict_by_feat(
+        chp, whp, offp,
+        batch_img_metas=[{"img_shape": (H, W), "batch_input_shape": (H, W),
+                          "border": (0, H, 0, W), "scale_factor": (1., 1.)}],
+        rescale=False, with_nms=False)
+    inst = res[0]
+    keep = inst.scores.cpu().numpy() > conf_threshold
+    return inst.bboxes.cpu().numpy()[keep]
+
+
+def _gac_predict_from_boxes(pipe, frame, size, device, conf_threshold: float) -> np.ndarray:
+    """deep_snake_gac: detector finds per-instance boxes, then a CLASSICAL geodesic
+    active contour (no learning) evolves a box-seeded level set to the fire
+    boundary on the fire-energy map. Tests whether classical evolution beats the
+    learned offset-snake from the same per-instance boxes."""
+    from flame.gac import run_gac, GACConfig
+    x = image_tensor(frame.rgb, size, device)
+    boxes = _detector_boxes(pipe, x, conf_threshold)
+    if len(boxes) == 0:
+        return np.zeros((size, size), dtype=np.uint8)
+    # Seed: a filled rectangle per detected box (at network res), eroded slightly
+    # so GAC grows out to the true boundary rather than starting over-sized.
+    seed = np.zeros((size, size), dtype=np.uint8)
+    for x0, y0, x1, y1 in boxes.astype(int):
+        x0, y0 = max(x0, 0), max(y0, 0)
+        x1, y1 = min(x1, size - 1), min(y1, size - 1)
+        if x1 > x0 and y1 > y0:
+            seed[y0:y1, x0:x1] = 255
+    # Run GAC on a size-resolution copy of the frame. fire_energy needs the RGB at
+    # the same resolution as the seed.
+    from flame.data import Frame
+    rgb_rs = cv2.resize(frame.rgb, (size, size), interpolation=cv2.INTER_LINEAR)
+    f_rs = Frame(frame_id=frame.frame_id, rgb=rgb_rs, thermal_c=None,
+                 gt_mask=np.zeros((size, size), np.uint8))
+    out = run_gac(f_rs, GACConfig(dilate_factor=1.0), init_mask=seed)
+    return (out > 0).astype(np.uint8)
+
+
 @torch.no_grad()
-def predict_native(method: str, model, frame, size: int, device) -> np.ndarray:
+def predict_native(method: str, model, frame, size: int, device,
+                   conf_threshold: float = 0.3) -> np.ndarray:
     """Predicted 0/255 mask at the frame's native resolution."""
     x = image_tensor(frame.rgb, size, device)
     if method == "unet":
@@ -152,19 +209,22 @@ def predict_native(method: str, model, frame, size: int, device) -> np.ndarray:
     elif method == "deep_snake_simple":
         net_mask = _snake_predict(model, x, size, device) * 255
     elif method == "deep_snake_paper":
-        net_mask = _snake_predict_paper(model, frame, size, device) * 255
+        net_mask = _snake_predict_paper(model, frame, size, device, conf_threshold) * 255
+    elif method == "deep_snake_gac":
+        net_mask = _gac_predict_from_boxes(model, frame, size, device, conf_threshold) * 255
     h, w = frame.gt_mask.shape
     return cv2.resize(net_mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
 def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
-                   size: int, device, write_csv: bool = False) -> dict:
+                   size: int, device, write_csv: bool = False,
+                   dataset: str = DEFAULT_DATASET, conf_threshold: float = 0.3) -> dict:
     model.eval()
     rows = []
     for fid in frame_ids:
-        frame = load_frame(fid, threshold_c=threshold_c)
+        frame = load_frame(fid, threshold_c=threshold_c, dataset=dataset)
         t0 = time.perf_counter()
-        pred = predict_native(method, model, frame, size, device)
+        pred = predict_native(method, model, frame, size, device, conf_threshold)
         latency = time.perf_counter() - t0
         rows.append({
             "frame": fid,
@@ -178,7 +238,7 @@ def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
     dices = np.array([r["dice"] for r in rows])
     if write_csv:
         RESULTS_DIR.mkdir(exist_ok=True)
-        out = RESULTS_DIR / f"{method}_per_frame.csv"
+        out = RESULTS_DIR / f"{_prefix(dataset)}{method}_per_frame.csv"
         with out.open("w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
@@ -187,46 +247,32 @@ def evaluate_split(method: str, model, frame_ids: list[str], threshold_c: float,
     return {"iou": float(ious.mean()), "dice": float(dices.mean()), "n": len(rows)}
 
 
-def compute_loss(method: str, model, batch, device) -> torch.Tensor:
+def compute_loss(method: str, model, batch, device,
+                 chamfer_weight: float = 0.05) -> torch.Tensor:
     image = batch["image"].to(device)
+    if method == "deep_snake_paper":
+        # PER-INSTANCE: PaperSnakeDataset gives one tight GT box + contour per
+        # fire component (no full-frame mask). The snake refines each box's
+        # octagon toward that component's boundary.
+        _, _, H, W = image.shape
+        boxes = batch["box"].to(device).float()          # [B, 4] x0,y0,x1,y1
+        gt = batch["gt_contour"].to(device)              # [B, N, 2]
+        features = model.extract_features(image)
+        contours = model.snake(features, boxes, image_size=(W, H))
+        # cyclic L1 + Chamfer (anti-collapse). contours[0] is the fixed octagon
+        # init; skip it so the loss only supervises the deformed iterations.
+        loss = 0
+        for c in contours[1:]:
+            loss = loss + snake_contour_loss(c, gt, chamfer_weight=chamfer_weight)
+        return loss
+
     mask = batch["mask"].to(device)
     if method == "unet":
         return bce_dice(model(image), mask)
     if method == "dals":
         phi, prob_logits = model(image)
         return dice_loss(phi, mask) + bce_dice(prob_logits, mask)
-    if method == "deep_snake_paper":
-        B, _, H, W = image.shape
-        
-        # 1. Get ground truth bounding boxes directly from the mask
-        boxes = []
-        for i in range(B):
-            pos = torch.where(mask[i, 0] > 0)
-            if len(pos[0]) > 0:
-                ymin, xmin = pos[0].min(), pos[1].min()
-                ymax, xmax = pos[0].max(), pos[1].max()
-                boxes.append(torch.tensor([xmin, ymin, xmax, ymax]))
-            else:
-                # Fallback if mask is completely empty
-                boxes.append(torch.tensor([0, 0, W, H])) 
-        boxes = torch.stack(boxes).to(device).float()
-        
-        # 2. Extract features (Assuming 'model' here is a wrapper that contains 
-        # both your backbone and DeepSnakePaper, or just run the backbone first)
-        features = model.extract_features(image) 
-        
-        # 3. Forward pass
-        contours = model.snake(features, boxes, image_size=(W, H))
-        
-        gt = batch["gt_contour"].to(device)
-        
-        # 4. Loss calculation (No coarse mask loss anymore!)
-        loss = 0
-        for c in contours:
-            loss = loss + cyclic_contour_loss(c, gt)
-            
-        return loss
-    
+
     coarse, contours = model(image, batch["init_contour"].to(device))
     gt = batch["gt_contour"].to(device)
     loss = bce_dice(coarse, mask)
@@ -238,32 +284,40 @@ def compute_loss(method: str, model, batch, device) -> torch.Tensor:
 
 def train(method: str, args) -> None:
     device = torch.device(args.device)
-    splits = make_splits()
+    splits = make_splits(dataset=args.dataset)
     train_ids, val_ids = splits["train"], splits["val"]
     if args.limit:
         train_ids, val_ids = train_ids[: args.limit], val_ids[: max(1, args.limit // 4)]
 
-    ds_cls = SnakeDataset if method == "deep_snake_simple" or method == "deep_snake_paper" else FlameDataset
-    train_ds = ds_cls(train_ids, threshold_c=args.threshold_c, size=args.size, augment=True)
+    if method == "deep_snake_paper":
+        ds_cls = PaperSnakeDataset          # one sample per fire component
+    elif method == "deep_snake_simple":
+        ds_cls = SnakeDataset               # one sample per frame (largest component)
+    else:
+        ds_cls = FlameDataset
+    train_ds = ds_cls(train_ids, threshold_c=args.threshold_c, size=args.size,
+                      augment=True, dataset=args.dataset)
     loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    print(f"{method}: {len(train_ds)} train frames, {len(val_ids)} val frames, device={device}")
+    print(f"{method} [{args.dataset}]: {len(train_ds)} train frames, {len(val_ids)} val frames, device={device}")
 
     model = build_model(method).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     best_iou = -1.0
     MODELS_DIR.mkdir(exist_ok=True)
-    ckpt = MODELS_DIR / f"{method}.pt"
+    ckpt = MODELS_DIR / f"{_prefix(args.dataset)}{method}.pt"
     for epoch in range(1, args.epochs + 1):
         model.train()
         running = 0.0
         for batch in loader:
             opt.zero_grad()
-            loss = compute_loss(method, model, batch, device)
+            loss = compute_loss(method, model, batch, device,
+                                chamfer_weight=args.chamfer_weight)
             loss.backward()
             opt.step()
             running += loss.item()
-        val = evaluate_split(method, model, val_ids, args.threshold_c, args.size, device)
+        val = evaluate_split(method, model, val_ids, args.threshold_c, args.size, device,
+                             dataset=args.dataset)
         print(f"  epoch {epoch:3d}  loss={running / max(len(loader), 1):.4f}  "
               f"val IoU={val['iou']:.4f}  Dice={val['dice']:.4f}")
         if val["iou"] > best_iou:
@@ -274,7 +328,23 @@ def train(method: str, args) -> None:
 
 def run_eval(method: str, args) -> None:
     device = torch.device(args.device)
-    ckpt = MODELS_DIR / f"{method}.pt"
+    if method == "deep_snake_gac":
+        # No trained model: detector (for per-instance boxes) + classical GAC.
+        print("Initializing detector for deep_snake_gac (classical contour, no snake)...")
+        model = DeepSnakePipeline(config_file=args.mmdet_config,
+                                  checkpoint_file=args.mmdet_checkpoint,
+                                  snake_feat_dim=64, device=device).to(device)
+        test_ids = make_splits(dataset=args.dataset)["test"]
+        if args.limit:
+            test_ids = test_ids[: args.limit]
+        print(f"=== {_prefix(args.dataset)}DEEP_SNAKE_GAC  eval on {len(test_ids)} test frames ===")
+        summary = evaluate_split(method, model, test_ids, args.threshold_c, args.size,
+                                 device, write_csv=True, dataset=args.dataset,
+                                 conf_threshold=args.conf_threshold)
+        print(f"  test IoU mean={summary['iou']:.4f}  Dice mean={summary['dice']:.4f}")
+        return
+
+    ckpt = MODELS_DIR / f"{_prefix(args.dataset)}{method}.pt"
     if not ckpt.exists():
         raise FileNotFoundError(f"No checkpoint at {ckpt}; train first.")
     if method == "deep_snake_paper":
@@ -286,27 +356,34 @@ def run_eval(method: str, args) -> None:
             device=device
         ).to(device)
         
-        # We only want the weights belonging to the 'snake' submodule
-        trained_weights = torch.load(ckpt, map_location=device)
-        snake_weights = {k.replace('snake.', ''): v for k, v in trained_weights.items() if k.startswith('snake.')}
+        # The training wrapper stores the snake under `self.snake`, so its keys
+        # are prefixed 'snake.'. Strip ONLY that leading prefix (not a global
+        # replace, which would also mangle 'snake...' substrings elsewhere).
+        trained_weights = torch.load(ckpt, map_location=device, weights_only=True)
+        snake_weights = {k[len('snake.'):]: v for k, v in trained_weights.items()
+                         if k.startswith('snake.')}
         model.snake.load_state_dict(snake_weights)
         
     else:
         model = build_model(method).to(device)
         model.load_state_dict(torch.load(ckpt, map_location=device))
-    test_ids = make_splits()["test"]
+    test_ids = make_splits(dataset=args.dataset)["test"]
     if args.limit:
         test_ids = test_ids[: args.limit]
-    print(f"=== {method.upper()}  eval on {len(test_ids)} test frames ===")
+    print(f"=== {_prefix(args.dataset)}{method.upper()}  eval on {len(test_ids)} test frames ===")
     summary = evaluate_split(method, model, test_ids, args.threshold_c, args.size,
-                             device, write_csv=True)
+                             device, write_csv=True, dataset=args.dataset,
+                             conf_threshold=args.conf_threshold)
     print(f"  test IoU mean={summary['iou']:.4f}  Dice mean={summary['dice']:.4f}")
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--method", choices=["unet", "dals", "deep_snake_simple", "deep_snake_paper"], required=True)
+    ap.add_argument("--method", choices=["unet", "dals", "deep_snake_simple", "deep_snake_paper",
+                                          "deep_snake_gac"], required=True)
+    ap.add_argument("--dataset", choices=["flame3", "flame1"], default=DEFAULT_DATASET,
+                    help="flame3 (thermal GT) or flame1 (hand-labeled PNG masks)")
     ap.add_argument("--mode", choices=["train", "eval"], default="train")
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
@@ -315,8 +392,16 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--threshold-c", type=float, default=DEFAULT_THRESHOLD_C)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit", type=int, default=None, help="Subset frames for a quick run")
-    ap.add_argument("--mmdet-config", type=str, default="centernet_config.py", help="Path to MMDet config")
-    ap.add_argument("--mmdet-checkpoint", type=str, default="centernet.pth", help="Path to MMDet weights")
+    ap.add_argument("--mmdet-config", type=str, default="flame/deep/centernet_flame.py",
+                    help="Path to the MMDet CenterNet config")
+    ap.add_argument("--mmdet-checkpoint", type=str, default="models/centernet.pth",
+                    help="Path to trained MMDet CenterNet weights")
+    ap.add_argument("--conf-threshold", type=float, default=0.3,
+                    help="CenterNet box confidence threshold for deep_snake_paper eval "
+                         "(lower = higher recall, more frames get a prediction)")
+    ap.add_argument("--chamfer-weight", type=float, default=0.05,
+                    help="Weight of the Chamfer (anti-collapse) term in the "
+                         "deep_snake_paper contour loss")
     return ap.parse_args()
 
 
