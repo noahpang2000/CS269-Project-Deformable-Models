@@ -3,8 +3,22 @@ data/
 images/
 *.zip
 
-# Ignore mmdetection repository
+# Ignore mmdetection repository (cloned into flame/)
+flame/mmdetection/
 flame/deep/mmdetection/
+
+# Generated COCO detection datasets (rebuilt by create_coco.py; large + symlinks)
+flame1_coco/
+flame3_coco/
+
+# Local agent / session files
+.claude/
+memories.json
+
+# LaTeX build artifacts (keep .tex and .pdf)
+report/*.aux
+report/*.log
+report/*.out
 
 # Ignore PyTorch model weight saves
 *.pt
