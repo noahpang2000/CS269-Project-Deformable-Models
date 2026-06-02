@@ -1,0 +1,157 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\captionsetup{font=small}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-2.5em}Why the Paper-Faithful Deep Snake Underperforms on FLAME-1\\
+\large An investigation: what we tried, what each fix bought, and why the snake head fails}
+\author{CS269 Project --- Deformable Models}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\section{Summary}
+
+The paper-faithful \texttt{deep\_snake\_paper} (CenterNet detector $\to$
+octagon-from-box $\to$ circular-conv snake) scored far below the detector-free
+\texttt{deep\_snake\_simple} (0.658 IoU) and the other learned methods on FLAME-1.
+We ran a sequence of targeted fixes, each of which improved the \emph{pipeline}
+but none of which made the \emph{learned snake head} beat the simple
+octagon-from-box geometry it is built on. The final diagnosis: the offset-based
+snake cannot fit small, irregular fire contours --- it fails to overfit even four
+fixed training samples --- so the refinement step is a net negative on this data.
+The box$\to$octagon prior does the real work.
+
+\section{The fixes we tried, in order}
+
+\begin{table}[H]
+\centering
+\caption{Each intervention and its effect on FLAME-1 test IoU (301 frames).
+``Oracle'' = snake given GT boxes; ``System'' = full detector$\to$snake pipeline.}
+\begin{tabular}{llcc}
+\toprule
+\# & Intervention & Result & Verdict \\
+\midrule
+0 & Baseline (whole-frame box, conf 0.30)       & System 0.050 & broken \\
+1 & Lower detector conf threshold 0.30$\to$0.10 & System 0.050$\to$0.218 & helped (recall) \\
+2 & Per-instance boxes (one box/blob)           & Oracle 0.096$\to$0.497; System 0.218$\to$0.348 & helped a lot \\
+3 & Stride-4 features + scaled offsets          & snake moves 1.3px$\to$6.4px; IoU flat & no net gain \\
+4 & Chamfer (anti-collapse) loss, weights 0.05--5.0 & still collapses & failed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{Fix 1 --- detector confidence threshold (free, no retrain)}
+The detector emitted low-confidence boxes; the default 0.30 cutoff discarded most
+of them. Sweeping the threshold:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+conf & 0.30 & 0.20 & 0.15 & 0.10 \\
+\midrule
+fired \% & 24 & 60 & 83 & 96 \\
+mean IoU & 0.050 & 0.125 & 0.181 & 0.218 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+IoU-given-a-detection stayed flat ($\approx$0.21) the whole way, so the recovered
+boxes were genuine detections, not noise --- pure recall recovery, $4.4\times$ for
+free. \emph{But this only fixed coverage, not per-detection quality.}
+
+\subsection*{Fix 2 --- per-instance boxes (the big one)}
+FLAME-1 fire is $\sim$9 scattered blobs/frame. The original code trained and
+evaluated the snake with \emph{one bounding box over all the fire}, which is 98\%
+empty (fire fills a median 2\% of it). A single closed octagon cannot wrap nine
+disconnected specks. Switching to \textbf{one box per connected component} (a new
+\texttt{PaperSnakeDataset}, one training sample per blob) lifted oracle IoU from
+0.096 to \textbf{0.497} ($5.2\times$) and system IoU to 0.348. This confirmed the
+dominant problem was the single-octagon-over-many-blobs mismatch, not the detector.
+
+\subsection*{Fix 3 --- the snake was a no-op}
+We then found the learned snake was barely moving: mean vertex displacement
+\textbf{1.27px} on a 512px image, and the raw octagon scored \emph{higher}
+(IoU 0.488) than the snake's final output (0.473). Two architectural bugs:
+\begin{itemize}
+\item \textbf{Stride-32 features.} The ResNet18 backbone (full, $-2$) gave a
+  16$\times$16 feature map for a 512px image; an $\sim$80px box covered $\sim$2
+  feature cells, so all 128 vertices sampled (nearly) the same feature and
+  predicted identical near-zero offsets. We truncated the backbone at
+  \texttt{layer1} (stride 4, 128$\times$128 map).
+\item \textbf{Sub-pixel offsets.} Raw offsets were $\sim$0.24px; we added an
+  offset scale ($\times$32) so iterations can actually deform the octagon.
+\end{itemize}
+After retraining, vertices moved 6.4px --- but IoU stayed flat and the contour
+now \emph{shrank to $\sim$51\% of the octagon's area}. It was moving, but moving
+inward (collapsing), not tracing the boundary.
+
+\subsection*{Fix 4 --- anti-collapse loss (failed)}
+We added a symmetric Chamfer term (\texttt{gt$\to$pred} direction penalizes
+uncovered GT boundary points, i.e.\ collapse) to the cyclic-L1 contour loss. A
+unit test confirmed it heavily penalizes collapse (a shrunken contour costs
+$57\times$ a spread one). Yet across weights 0.05, 0.2, 0.5 (and later 1.0, 5.0)
+the snake \emph{still collapsed} (final/octagon area 0.53--0.68; final IoU still
+below octagon-only).
+
+\section{Root cause: the snake cannot fit the target}
+
+We ran the decisive test --- can the model \textbf{overfit four fixed samples}?
+A model that cannot overfit four examples has a capacity/optimization bug, not a
+data or regularization problem.
+
+\begin{itemize}
+\item Loss \emph{does} decrease (54$\to$4.9) and gradients flow (snake grad-norm
+  $\sim$2026), so wiring is fine.
+\item The target is good: rasterizing the GT contours themselves gives IoU
+  \textbf{0.881} --- a high ceiling.
+\item The loss correctly prefers tracing over collapse on a clean synthetic
+  example (1.04 vs 122 at weight 0.05).
+\item \textbf{Yet on 4 fixed real samples, 200 steps, even at Chamfer weight 5.0,
+  the contour collapses (area ratio 0.24--0.40).}
+\end{itemize}
+
+\textbf{Mechanism.} \texttt{get\_octagon\_from\_box} produces a fixed-topology
+octagon with 128 evenly-spaced vertices. The snake predicts per-vertex offsets
+sampled from a feature grid. For a small, jagged fire blob there is no smooth
+offset field mapping evenly-spaced octagon vertices onto the irregular GT
+boundary --- the vertex-correspondence problem is not solvable by local feature
+sampling. The optimizer's best \emph{reachable} move is to pull vertices toward
+the dense interior (lowering mean L1), which manifests as collapse. This is a
+known limitation of offset-based contour models on small/fragmented targets ---
+precisely FLAME-1's fire.
+
+\section{Conclusion}
+
+\begin{enumerate}
+\item Every fix improved the \emph{pipeline} (recall 0.05$\to$0.22; per-instance
+  oracle 0.10$\to$0.50), but the \emph{learned snake head never beat the
+  octagon-from-box prior} (final $\approx$0.46 vs octagon $\approx$0.51).
+\item On FLAME-1's small, fragmented fire, the offset-snake refinement is a net
+  negative: the box$\to$octagon geometry is the better predictor.
+\item This is an honest negative result for the paper-faithful design \emph{on this
+  data}. A non-offset refinement head (e.g.\ a per-instance mask head, or a
+  boundary model with adaptive vertex count) would be the path forward; the
+  offset-snake is the wrong tool for many tiny irregular regions.
+\item Practical recommendation: use \texttt{deep\_snake\_simple} (0.658) or U-Net
+  (0.772) for FLAME-1; if the paper pipeline is required, report
+  octagon-from-detector-box (the snake's input) rather than the collapsing snake
+  output.
+\end{enumerate}
+
+\vspace{0.5em}
+\footnotesize
+Artifacts: \texttt{results/rerun\_flame1\_20260601\_193349/} (threshold sweep, viz),
+\texttt{results/rerun\_flame1\_perinstance\_094117/}, \texttt{rerun\_flame1\_snakefix\_100007/}.
+Code: \texttt{flame/deep/dataset.py} (\texttt{PaperSnakeDataset}),
+\texttt{flame/deep/deep\_snake.py} (stride-4 backbone, offset scale),
+\texttt{flame/deep/losses.py} (\texttt{snake\_contour\_loss}).
+\end{document}

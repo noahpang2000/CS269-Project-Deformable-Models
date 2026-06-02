@@ -1,0 +1,106 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\captionsetup{font=small}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-2.5em}Tuning DALS: An 80-Trial Hyperparameter Search\\
+\large Can the level-set hyperparameters move the needle, or is the ceiling elsewhere?}
+\author{CS269 Project --- Deformable Models}
+\date{\today}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\section{Question}
+
+DALS couples a U-Net trunk to a differentiable Chan--Vese level-set evolution
+with learnable parameters ($\mu$, $\lambda_1$, $\lambda_2$, $dt$), unrolled over
+$n_{\text{iter}}$ steps. The structural and loss hyperparameters were never
+searched --- they sit at hand-picked defaults. This mini report asks a simple
+question: \emph{does any hyperparameter configuration beat the current DALS
+baselines (FLAME-1 IoU 0.747, FLAME-3 IoU 0.122) beyond training noise?} A second
+question rides along: does optimizing for \emph{boundary} fidelity select a
+different configuration than optimizing for \emph{region} overlap?
+
+\section{Method}
+
+Random search, four arms = $\{$FLAME-3, FLAME-1$\} \times \{$val-IoU objective,
+val-BF objective$\}$, 20 trials each (80 trials total). Each trial trains DALS at
+reduced epochs (FLAME-3: 25; FLAME-1: 12 at 1024\,px), records \emph{both} val IoU
+and val boundary F-score@2px, and the arm ranks by its own objective. The winner
+of each arm is retrained at the full 50 epochs and scored on the held-out test
+split (94 FLAME-3 / 301 FLAME-1 frames).
+
+\paragraph{Search space.} $n_{\text{iter}}\!\in\!\{3,5,8,12\}$;
+$\mu\!\in\![0.1,1.0]$; $\lambda_1,\lambda_2\!\in\![0.5,2.0]$;
+$dt\!\in\![0.05,0.3]$; loss $\in\{$bce\_dice, focal\_tversky$\}$ with Focal--Tversky
+$\beta\!\in\![0.5,0.8]$ ($\alpha\!=\!1\!-\!\beta$), $\gamma\!\in\![0.5,1.0]$.
+Fixed at defaults: $\text{lr}=10^{-4}$, batch $=4$, light augmentation. Config
+sampling is seeded for reproducibility.
+
+\section{Results}
+
+Every one of the four arms ranked the \emph{same} configuration first:
+\[
+n_{\text{iter}}\!=\!3,\;\mu\!=\!0.21,\;\lambda_1\!=\!0.93,\;\lambda_2\!=\!1.38,\;
+dt\!=\!0.19,\;\text{loss}=\text{bce\_dice}.
+\]
+
+\begin{table}[H]
+\centering
+\caption{Winning config retrained at 50 epochs, test-split evaluation. Baseline
+is the existing DALS checkpoint.}
+\begin{tabular}{llrrr}
+\toprule
+Dataset & Search objective & Baseline IoU & Tuned test IoU & Tuned test Dice \\
+\midrule
+FLAME-3 & val IoU & 0.122 & 0.120 & 0.184 \\
+FLAME-3 & val BF  & 0.122 & \textbf{0.129} & 0.193 \\
+FLAME-1 & val IoU & 0.747 & \textbf{0.753} & 0.858 \\
+FLAME-1 & val BF  & 0.747 & 0.745 & 0.853 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Findings}
+
+\paragraph{No region-vs-boundary tradeoff.} On both datasets the val-IoU arm and
+the val-BF arm selected the \emph{identical} winning hyperparameters. Optimizing
+for boundary fidelity does not pull the DALS configuration anywhere different than
+optimizing for region overlap --- there is no Pareto frontier to exploit.
+
+\paragraph{FLAME-3 is a wash.} The tuned test IoU (0.120 / 0.129) straddles the
+0.122 baseline. Tellingly, two retrains of the \emph{same} config differed by
+0.009 IoU from training stochasticity alone (no fixed retrain seed), so the
+run-to-run noise floor is $\approx\!\pm0.01$ --- the entire tuned-vs-baseline gap
+sits inside it. This is consistent with the detection-bottleneck story: on
+FLAME-3 the ground truth is hidden $\ge150^\circ$C thermal support, and the
+ceiling is set by what the U-Net trunk can \emph{detect}, not by the level-set
+hyperparameters.
+
+\paragraph{FLAME-1 is a wash too, but confirms a strong baseline.} Best tuned test
+IoU 0.753 vs.\ 0.747 baseline is a $+0.006$ nudge, again within noise. Tuning
+neither broke nor meaningfully improved the already-strong visible-flame regime.
+
+\paragraph{$n_{\text{iter}}\!=\!3$ and bce\_dice dominate.} Across all arms the
+top trials clustered on few level-set iterations and the bce\_dice loss;
+high-$n_{\text{iter}}$ and Focal--Tversky trials were frequently unstable (several
+near-zero val IoU). The default DALS recipe is already close to optimal.
+
+\section{Bottom line}
+
+The 80-trial search found no hyperparameter configuration that beats the existing
+DALS baselines beyond training noise on either dataset. The defaults are
+effectively already tuned. If the goal is to actually move the FLAME-3 number, the
+lever is the detection trunk --- recovering more of the hidden thermal support ---
+not the contour hyperparameters.
+
+\end{document}
