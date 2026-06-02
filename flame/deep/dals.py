@@ -85,9 +85,10 @@ class DALS(nn.Module):
         self.dt = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, x):
-        # Extract deep semantic features [B, C, H, W]
-        features = self.trunk(x, return_features=True)                       
-        
+        # UNet(return_features=True) returns (logits, feature_map); we want the
+        # decoder feature map for the Chan-Vese evolution, not the logits.
+        _, features = self.trunk(x, return_features=True)
+
         # Predict initial level set [B, 1, H, W]
         phi = self.phi_head(features)
         prob_logits = phi.clone() # Keep the pre-evolution logits for the auxiliary loss
