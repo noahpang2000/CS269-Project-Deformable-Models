@@ -17,7 +17,7 @@ import numpy as np
 from pathlib import Path
 
 from flame.data import (DEFAULT_DATASET, PROJECT_ROOT, RGB_DIR,
-                        FLAME1_RGB_DIR, load_frame)
+                        FLAME1_RGB_DIR, FLAME2_RGB_DIR, load_frame)
 from flame.splits import make_splits
 
 MIN_CC_PX = 30
@@ -34,6 +34,8 @@ def _dataset_paths(dataset: str):
         return coco_root, RGB_DIR, ".JPG"
     if dataset == "flame1":
         return coco_root, FLAME1_RGB_DIR, ".jpg"
+    if dataset == "flame2":
+        return coco_root, FLAME2_RGB_DIR, ".jpg"
     raise ValueError(f"unknown dataset {dataset!r}")
 
 
@@ -95,7 +97,7 @@ def create_coco_json(frame_ids, output_path, dataset, src_dir, images_dir, ext):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", choices=["flame3", "flame1"], default=DEFAULT_DATASET)
+    ap.add_argument("--dataset", choices=["flame3", "flame1", "flame2"], default=DEFAULT_DATASET)
     args = ap.parse_args()
 
     coco_root, src_dir, ext = _dataset_paths(args.dataset)

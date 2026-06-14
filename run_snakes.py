@@ -19,13 +19,19 @@ from pathlib import Path
 
 import numpy as np
 
-from flame.data import DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
+from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
 from flame.baselines import DEFAULT_TAU, color_threshold_mask
 from flame.metrics import dice, iou
 from flame.kass import KassConfig, run_kass
 from flame.gac import GACConfig, run_gac
+from flame.splits import make_splits
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+
+def _prefix(dataset: str) -> str:
+    """CSV filename prefix; flame3 stays unprefixed for back-compat."""
+    return "" if dataset == "flame3" else f"{dataset}_"
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,10 +40,22 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--method", choices=["color", "kass", "gac", "all"], default="all")
     ap.add_argument("--init", choices=["oracle", "color"], default="oracle",
                     help="Contour init for kass/gac: oracle (from GT) or color (RGB floor)")
+    ap.add_argument("--dataset", choices=["flame3", "flame1", "flame2", "combined"],
+                    default=DEFAULT_DATASET,
+                    help="Which dataset to score (oracle init works on any; thermal "
+                         "energy-mode is FLAME-3 only)")
+    ap.add_argument("--split", choices=["all", "test"], default="all",
+                    help="Score every frame (default, matches the original FLAME-3 "
+                         "classical run) or only the held-out test split (comparable "
+                         "to the deep methods)")
     ap.add_argument("--energy-mode", default="rg", choices=["rg", "thermal"])
     ap.add_argument("--color-tau", type=float, default=DEFAULT_TAU,
                     help="R-G threshold for the color floor / color init (default 0.15)")
     ap.add_argument("--threshold-c", type=float, default=DEFAULT_THRESHOLD_C)
+    ap.add_argument("--max-side", type=int, default=None,
+                    help="Downscale frames so max(H,W)==max-side before running the "
+                         "contour (keeps FLAME-1's 4K and the combined set tractable; "
+                         "None = native resolution)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--frames", nargs="+", default=None)
     return ap.parse_args()
@@ -62,7 +80,8 @@ def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> Non
     rows: list[dict] = []
     skipped_empty = 0
     for i, fid in enumerate(frame_ids, 1):
-        frame = load_frame(fid, threshold_c=args.threshold_c)
+        frame = load_frame(fid, threshold_c=args.threshold_c, dataset=args.dataset,
+                           max_side=args.max_side)
         if frame.gt_mask.max() == 0:
             skipped_empty += 1
             continue
@@ -93,7 +112,7 @@ def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> Non
     print(f"  latency median={np.median(lat):.3f} s/frame")
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    out_csv = RESULTS_DIR / f"{name}_per_frame.csv"
+    out_csv = RESULTS_DIR / f"{_prefix(args.dataset)}{name}_per_frame.csv"
     with out_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -103,10 +122,15 @@ def run_method(name: str, frame_ids: list[str], args: argparse.Namespace) -> Non
 
 def main() -> None:
     args = parse_args()
-    frame_ids = args.frames if args.frames else list_frame_ids()
+    if args.frames:
+        frame_ids = args.frames
+    elif args.split == "test":
+        frame_ids = make_splits(dataset=args.dataset)["test"]
+    else:
+        frame_ids = list_frame_ids(dataset=args.dataset)
     if args.frames is None and args.limit is not None:
         frame_ids = frame_ids[: args.limit]
-    print(f"Frames to process: {len(frame_ids)}")
+    print(f"Frames to process: {len(frame_ids)}  (dataset={args.dataset}, split={args.split})")
     methods = ["color", "kass", "gac"] if args.method == "all" else [args.method]
     for name in methods:
         run_method(name, frame_ids, args)

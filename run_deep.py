@@ -79,8 +79,13 @@ class DeepSnakeTrainWrapper(torch.nn.Module):
         return self.reduce(feat)
         
     def forward(self, image, boxes, image_size):
-        """Optional: allows direct calling if needed"""
+        """Refine each box's octagon. Training feeds one image per box (B==K);
+        oracle eval feeds a single image with its K component boxes, so broadcast
+        the lone feature map across the K boxes to match the snake's per-box
+        grid_sample (FLAME-1 frames usually have K==1, FLAME-2 many more)."""
         feat = self.extract_features(image)
+        if feat.shape[0] == 1 and boxes.shape[0] > 1:
+            feat = feat.expand(boxes.shape[0], -1, -1, -1)
         return self.snake(feat, boxes, image_size)
 
 def build_model(method: str) -> torch.nn.Module:
@@ -97,10 +102,14 @@ def _circle(cx: float, cy: float, r: float, n: int) -> np.ndarray:
     return np.stack([cx + r * np.cos(ang), cy + r * np.sin(ang)], axis=1).astype(np.float32)
 
 
-def _snake_predict(model, x, size, device) -> np.ndarray:
-    """RGB-only Deep Snake inference: coarse seg -> per-CC circle init -> deform -> union."""
+def _snake_predict(model, x, size, device, seed_threshold: float = 0.5) -> np.ndarray:
+    """RGB-only Deep Snake inference: coarse seg -> per-CC circle init -> deform -> union.
+
+    seed_threshold: probability cutoff on the coarse seg for choosing which
+    connected components seed contours. Lower -> more/larger seeds -> more output.
+    """
     coarse, _ = model(x, None)
-    prob = (torch.sigmoid(coarse)[0, 0].cpu().numpy() > 0.5).astype(np.uint8)
+    prob = (torch.sigmoid(coarse)[0, 0].cpu().numpy() > seed_threshold).astype(np.uint8)
     num, labels, stats, centroids = cv2.connectedComponentsWithStats(prob, connectivity=8)
     mask = np.zeros((size, size), dtype=np.uint8)
     for lbl in range(1, num):
@@ -207,7 +216,7 @@ def predict_native(method: str, model, frame, size: int, device,
         phi, _ = model(x)
         net_mask = (torch.sigmoid(phi)[0, 0].cpu().numpy() > 0.5).astype(np.uint8) * 255
     elif method == "deep_snake_simple":
-        net_mask = _snake_predict(model, x, size, device) * 255
+        net_mask = _snake_predict(model, x, size, device, seed_threshold=conf_threshold) * 255
     elif method == "deep_snake_paper":
         net_mask = _snake_predict_paper(model, frame, size, device, conf_threshold) * 255
     elif method == "deep_snake_gac":
@@ -286,6 +295,11 @@ def train(method: str, args) -> None:
     device = torch.device(args.device)
     splits = make_splits(dataset=args.dataset)
     train_ids, val_ids = splits["train"], splits["val"]
+    if args.train_stride > 1:
+        # Adjacent frames are near-duplicate video; thinning the train/val sets
+        # cuts wall-clock with little signal loss (test split stays full).
+        train_ids = train_ids[:: args.train_stride]
+        val_ids = val_ids[:: args.train_stride]
     if args.limit:
         train_ids, val_ids = train_ids[: args.limit], val_ids[: max(1, args.limit // 4)]
 
@@ -297,7 +311,9 @@ def train(method: str, args) -> None:
         ds_cls = FlameDataset
     train_ds = ds_cls(train_ids, threshold_c=args.threshold_c, size=args.size,
                       augment=True, dataset=args.dataset)
-    loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                        num_workers=args.num_workers,
+                        persistent_workers=args.num_workers > 0, pin_memory=True)
     print(f"{method} [{args.dataset}]: {len(train_ds)} train frames, {len(val_ids)} val frames, device={device}")
 
     model = build_model(method).to(device)
@@ -382,8 +398,10 @@ def parse_args() -> argparse.Namespace:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--method", choices=["unet", "dals", "deep_snake_simple", "deep_snake_paper",
                                           "deep_snake_gac"], required=True)
-    ap.add_argument("--dataset", choices=["flame3", "flame1"], default=DEFAULT_DATASET,
-                    help="flame3 (thermal GT) or flame1 (hand-labeled PNG masks)")
+    ap.add_argument("--dataset", choices=["flame3", "flame1", "flame2", "synth", "combined"],
+                    default=DEFAULT_DATASET,
+                    help="flame3 (thermal GT), flame1 (hand-labeled PNG masks), "
+                         "flame2 (colorized-IR-derived GT), or combined (pooled FLAME 1+2+3)")
     ap.add_argument("--mode", choices=["train", "eval"], default="train")
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
@@ -392,6 +410,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--threshold-c", type=float, default=DEFAULT_THRESHOLD_C)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--limit", type=int, default=None, help="Subset frames for a quick run")
+    ap.add_argument("--num-workers", type=int, default=6,
+                    help="DataLoader workers for parallel frame decode (0 = serial)")
+    ap.add_argument("--train-stride", type=int, default=1,
+                    help="Keep every Nth train/val frame (adjacent video frames are "
+                         "near-duplicates); test split is unaffected")
     ap.add_argument("--mmdet-config", type=str, default="flame/deep/centernet_flame.py",
                     help="Path to the MMDet CenterNet config")
     ap.add_argument("--mmdet-checkpoint", type=str, default="models/centernet.pth",

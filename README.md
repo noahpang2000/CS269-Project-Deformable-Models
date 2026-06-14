@@ -1,134 +1,117 @@
-# CS269-Project-Deformable-Models
+# CS269 Project: Deformable Models for Wildfire Segmentation
 
-Wildfire segmentation on the **FLAME-3** dataset (Sycan Marsh CV subset),
-comparing classical deformable models against deep methods.
+Segmenting wildfire from drone imagery, comparing classical active-contour
+(deformable) models against deep methods, across the **FLAME-1, FLAME-2, and
+FLAME-3** datasets and a pooled **combined** set.
 
-**The task.** Ground truth is where the fire actually is — the ≥150 °C region of
-the paired thermal frame. In the RGB the fire is usually **not visible as red
-flame**: it is obscured by smoke or otherwise hard to see, and measurably the
-in-fire pixels are *no redder than the background* (see the color floor below).
-So this is not "segment the orange flames" — it is "recover the location of a
-largely hidden hot region from RGB," with thermal used only to define the label.
-That is what makes a trivial color rule fail and a learned method potentially
-worthwhile.
+**Methods.** Classical Kass Snakes and Geodesic Active Contours (GAC); deep
+methods U-Net, Deep Active Lesion Segmentation (DALS), and Deep Snake in two
+variants (a detector-free "simple" variant and the paper-faithful CenterNet
+`+` snake "paper" variant); plus an R$-$G color-threshold floor.
 
-The classical methods are run on the RGB frames and scored against the
-thermal-thresholded GT:
+**The task differs by dataset:**
 
-| Method | Family | Implementation |
-|---|---|---|
-| **Kass Snakes** (Kass et al. 1988) | parametric, single closed contour | `skimage.segmentation.active_contour` |
-| **Geodesic Active Contours** (Caselles et al. 1997) | level set, boundary-driven, multi-component | `skimage.segmentation.morphological_geodesic_active_contour` |
+| Dataset | RGB | Ground truth | Difficulty |
+|---|---|---|---|
+| **FLAME-1** | close drone views, flame directly visible | hand-labeled flame masks | fire is visible; refine the boundary |
+| **FLAME-2** | aerial, heavily smoke-obscured | derived from the **colorized-IR** video (no raw Celsius) | fire barely visible in RGB |
+| **FLAME-3** | aerial, smoke-obscured | thermal TIFF thresholded at $\geq$150 °C | fire barely visible in RGB |
+| **combined** | union of all three | each dataset's own GT | mixes visible-flame and thermal-hot labels |
 
 ## Data layout
 
-The FLAME-3 subset is copied locally under `data/` (gitignored). Only the two
-directories the pipeline reads are kept:
+Datasets live under `data/` (gitignored). The pipeline reads:
 
 ```
-data/FLAME3/Fire/
-├── RGB/Corrected FOV/   00001.JPG ... 00622.JPG   (aligned RGB input)
-└── Thermal/Celsius TIFF/ 00001.TIFF ... 00622.TIFF (radiometric, degrees C)
+data/FLAME1/{images,Masks}/                       # RGB jpg + binary PNG mask
+data/FLAME2/{images,Masks,ir}/                    # sampled from the video pairs
+data/FLAME2/#1-7) All Video Pairs.zip             # source IR+RGB videos
+data/FLAME3/Fire/RGB/Corrected FOV/  + Thermal/Celsius TIFF/
 ```
 
-The ground-truth mask is **not** stored — it is regenerated each run by
-thresholding the Celsius TIFF (`>= 150 °C` by default, plus 3×3 morphological
-cleanup and a 20-px minimum-blob filter). This is the literal
-"temperature-thresholded infrared frame" used as the target.
+**FLAME-2** ships as seven paired RGB`+`colorized-IR videos with no per-pixel
+temperature. `scripts/extract_flame2.py` samples paired frames at ~1 fps and
+derives the GT from the IR palette (dense hot-speckle regions), resizing the
+mask into the RGB frame under a *resize-and-pair* policy (`flame.data.flame2_fire_mask`):
+
+```bash
+python scripts/extract_flame2.py            # writes data/FLAME2/{images,Masks,ir}
+```
 
 ## Setup
 
-Requires Python with the scientific stack (`numpy`, `opencv-python`,
-`scikit-image`, `tifffile`):
+Two environments are used on this machine:
+
+- **base** (`python3`, torch) — runs everything except the CenterNet detector.
+- **`flame-snake`** conda env (torch 2.1 `+` mmdet 3.3 `+` mmcv 2.1) — required for
+  the Deep Snake (paper) CenterNet pipeline. Run those steps with
+  `~/anaconda3/envs/flame-snake/bin/python`.
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt        # numpy, opencv, scikit-image, tifffile, torch
 ```
-
-On this machine the working interpreter is the miniconda base env
-(`~/miniconda3/python.exe`, Python 3.13) — it already has all four packages.
 
 ## Running
 
-```bash
-# Both methods on the first 30 frames (quick check):
-python run_snakes.py --method both --limit 30
-
-# Kass only, every frame, custom thermal threshold:
-python run_snakes.py --method kass --threshold-c 200
-
-# Specific frames:
-python run_snakes.py --method gac --frames 00536 00540 00589
-```
-
-Key flags (`python run_snakes.py --help` for all):
-
-- `--method {kass,gac,both}`
-- `--energy-mode {rg,thermal}` — image feature driving the contour
-  (`rg` = red-minus-green opponency, the default fire cue)
-- `--threshold-c` — thermal threshold in °C for the GT mask (default 150)
-- `--limit N` / `--frames ...` — subset selection
-
-Frames whose thermal GT is empty are skipped automatically (no contour can be
-initialised from an empty mask).
-
-## Output
-
-Per-run console summary (mean / median / std IoU and Dice, median latency) plus
-a per-frame CSV at `results/<method>_per_frame.csv` with columns:
-`frame, iou, dice, gt_px, pred_px, latency_s`.
-
-Both methods are **oracle-initialised**: the contour starts from the GT mask
-scaled outward 15% (Kass) or the GT dilated to ~1.32× area (GAC), matching the
-project proposal. They measure how well each method *refines* a known-location
-prior, not detection from scratch.
-
-## Deep baselines (PyTorch)
-
-Three learned methods take **RGB only** at inference and are trained against the
-same thermal-thresholded masks. They need `torch` + `torchvision`
-(`pip install -r requirements.txt`); CPU works but is slow, no GPU required.
-
-| Method | Output | Notes |
-|---|---|---|
-| **U-Net** | per-pixel mask | compact from-scratch U-Net; control for "is a contour head needed?" |
-| **DALS** | level set | U-Net trunk + differentiable Chan-Vese evolution (Hatamizadeh 2019, simplified) |
-| **Deep Snake** | polygon(s) | circular-conv contour deformation (Peng 2020). **Not** the official repo: the CenterNet detector + deformable-conv ops are replaced by a coarse-seg head whose connected components seed the initial contours. |
+**Classical** (Kass / GAC / color floor), per-frame, scored against the GT:
 
 ```bash
-python run_deep.py --method unet       --mode train --epochs 50
-python run_deep.py --method unet       --mode eval
-python run_deep.py --method dals       --mode train
-python run_deep.py --method deep_snake --mode train --batch-size 4
-# quick check on a handful of frames:
-python run_deep.py --method unet --mode train --epochs 2 --limit 16
+python run_snakes.py --method all --dataset flame3 --init oracle
+python run_snakes.py --dataset flame2 --split test --init oracle --max-side 1024
 ```
 
-Checkpoints (best val IoU) → `models/<method>.pt` (gitignored); test scores →
-`results/<method>_per_frame.csv`. Train/val/test is a contiguous 70/15/15 split
-(`flame/splits.py`) to avoid temporal leakage between near-duplicate frames.
+**Deep methods** — `--dataset {flame1,flame2,flame3,combined}`, `--mode {train,eval}`:
 
-> These deep methods are written but **not yet run/verified** here — there is no
-> PyTorch or GPU in this environment, so they were delivered as code only and
-> pass a syntax check but not an execution test. Train them where torch is
-> installed.
+```bash
+python run_deep.py --method unet --dataset flame2 --mode train --epochs 30 \
+                   --train-stride 2 --num-workers 6
+python run_deep.py --method unet --dataset flame2 --mode eval
+```
+
+**Deep Snake (paper)** needs the CenterNet detector (run in the `flame-snake` env):
+
+```bash
+python -m flame.deep.create_coco --dataset flame2
+python flame/mmdetection/tools/train.py flame/deep/centernet_flame2.py \
+       --work-dir work_dirs/centernet_flame2
+python run_deep.py --method deep_snake_paper --dataset flame2 --mode train
+python run_deep.py --method deep_snake_paper --dataset flame2 --mode eval \
+       --mmdet-config flame/deep/centernet_flame2.py \
+       --mmdet-checkpoint work_dirs/centernet_flame2/epoch_10.pth --conf-threshold 0.05
+```
+
+End-to-end drivers: `scripts/run_flame2_combined.sh` (train) and
+`scripts/finalize_flame2.sh` (metrics + figures).
+
+## Metrics & figures
+
+```bash
+python scripts/compute_flame2_metrics.py --dataset flame2     # IoU / Dice / BF@2px
+python scripts/combined_transfer.py                           # pooled vs dataset-specific
+python scripts/make_flame2_figs.py                            # galleries + bar charts
+```
+
+Checkpoints → `models/`, per-frame scores → `results/`, both gitignored.
 
 ## Code layout
 
 ```
 flame/
-├── data.py           # frame loading + thermal-threshold GT generation
-├── contour_utils.py  # fire-energy features + polygon/level-set geometry
-├── kass.py           # Kass Snakes (KassConfig, run_kass)
-├── gac.py            # Geodesic Active Contours (GACConfig, run_gac)
-├── metrics.py        # IoU + Dice
-├── splits.py         # contiguous 70/15/15 train/val/test split
+├── data.py            # frame loading + GT generation (all datasets, incl. FLAME-2 IR)
+├── splits.py          # 70/15/15 splits (per-dataset for the combined set)
+├── kass.py, gac.py    # classical contours
+├── baselines.py       # color-threshold floor
+├── metrics.py         # IoU, Dice
+├── contour_utils.py   # fire energy + polygon/level-set geometry
 └── deep/
-    ├── dataset.py    # torch datasets (FlameDataset, SnakeDataset)
-    ├── losses.py     # BCE+Dice, Dice, cyclic contour loss
-    ├── unet.py       # U-Net
-    ├── dals.py       # DALS (level-set head)
-    └── deep_snake.py # Deep Snake-style contour deformation
-run_snakes.py         # CLI: classical Kass/GAC, score, write CSV
-run_deep.py           # CLI: train/eval the deep baselines
+    ├── unet.py, dals.py
+    ├── deep_snake_simplified.py   # detector-free Deep Snake
+    ├── deep_snake.py              # CenterNet-based Deep Snake (paper)
+    ├── create_coco.py, centernet_*.py   # detector training data + configs
+    ├── dataset.py, losses.py
+run_snakes.py          # CLI: classical methods
+run_deep.py            # CLI: train/eval the deep methods
+scripts/               # extraction, metrics, transfer, figures, drivers
 ```
+
+> The LaTeX report (`report.tex`, `report/`) is kept out of version control.

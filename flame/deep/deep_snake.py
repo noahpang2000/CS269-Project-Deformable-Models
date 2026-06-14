@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmdet.apis import init_detector
+# mmdet is only needed for the CenterNet detector in DeepSnakePipeline (the
+# detector-based "paper" variant). Import it lazily so the mmdet-free pieces
+# (the snake head DeepSnakePaper, used for training) and the rest of run_deep.py
+# still work in environments without mmdet installed.
 
 class CircConv(nn.Module):
     """1D convolution with circular padding -- preserves closed-loop topology."""
@@ -166,6 +169,7 @@ class DeepSnakePipeline(nn.Module):
         
         # 1. Load the pre-trained MMDet CenterNet
         # init_detector handles building the architecture and loading the weights
+        from mmdet.apis import init_detector  # lazy: only the detector path needs mmdet
         self.detector = init_detector(config_file, checkpoint_file, device=device)
         
         # Freeze the detector if you only want to train the Snake head right now
