@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Active Contour Models for Wildfire Segmentation</title>
+<style>
+  :root {
+    --ink: #1a1a1a; --muted: #5b5b5b; --line: #e3e3e3;
+    --accent: #b23b2e; --bg: #fbfaf8; --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif; line-height: 1.6;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 22px 80px; }
+  header {
+    border-bottom: 3px solid var(--accent); padding: 56px 0 28px; margin-bottom: 36px;
+  }
+  h1 {
+    font-size: 2.05rem; line-height: 1.2; margin: 0 0 14px; letter-spacing: -0.01em;
+  }
+  .authors { font-size: 1.12rem; margin: 0 0 4px; }
+  .affil { color: var(--muted); font-style: italic; margin: 0; }
+  .links {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .links a {
+    text-decoration: none; color: #fff; background: var(--accent);
+    padding: 9px 16px; border-radius: 6px; font-size: 0.92rem; font-weight: 600;
+    transition: background .15s ease;
+  }
+  .links a.secondary { background: #333; }
+  .links a:hover { background: #8d2c22; }
+  .links a.secondary:hover { background: #000; }
+  h2 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--accent); border-bottom: 1px solid var(--line);
+    padding-bottom: 6px; margin: 48px 0 18px;
+  }
+  .abstract { font-size: 1.05rem; }
+  figure {
+    margin: 0 0 34px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; overflow: hidden;
+  }
+  figure img { width: 100%; height: auto; display: block; background: #f4f2ef; }
+  figcaption {
+    font-size: 0.92rem; color: var(--muted); padding: 12px 16px; line-height: 1.5;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  .note {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 0.85rem; color: var(--muted); background: #f3efe9;
+    border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 4px;
+    margin-top: 8px;
+  }
+  footer {
+    margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 0.9rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Active Contour Models for Wildfire Segmentation</h1>
+    <p class="authors">Brody Maddox &nbsp;&middot;&nbsp; Noah Pang</p>
+    <p class="affil">University of California, Los Angeles &mdash; CS&nbsp;269</p>
+    <nav class="links">
+      <a href="report.pdf">Project Report (PDF)</a>
+      <a class="secondary" href="code/">Source Code</a>
+      <a class="secondary" href="https://github.com/noahpang2000/CS269-Project-Deformable-Models">GitHub</a>
+    </nav>
+  </header>
+
+  <section>
+    <h2>Abstract</h2>
+    <p class="abstract">
+      We study whether active contour (deformable) models can segment wildfire
+      from aerial imagery, evaluating classical Snakes, Geodesic Active Contours
+      (GAC), Deep Active Lesion Segmentation (DALS), and two variants of Deep
+      Snake, against a convolutional U-Net baseline. We evaluate on three
+      datasets of drone-captured imagery of prescribed burns: FLAME-1, FLAME-2,
+      and FLAME-3. On FLAME-1, where flames are directly visible, most methods
+      segment well, led by U-Net and DALS. On the smoke-obscured FLAME-2 and
+      FLAME-3, no method recovers the fire from RGB, and only oracle-initialized
+      contours, which are handed the ground-truth location, succeed. Pooling all
+      three datasets does not help, and in fact degrades every method and
+      collapses DALS entirely, because FLAME-1's visible-flame labels and
+      FLAME-2/3's thermal-hot labels define incompatible targets. The difficulty
+      is locating the fire when it is obscured; once located, refining the
+      boundary is easy.
+    </p>
+  </section>
+
+  <section>
+    <h2>Results</h2>
+
+    <figure>
+      <img src="report/figs/paper/all_methods.png" alt="All methods on FLAME-1">
+      <figcaption>
+        <b>Every method on FLAME-1 (three frames).</b> Rows, top to bottom: RGB,
+        ground truth (blue), then predictions (red) for Kass (oracle), GAC
+        (oracle), U-Net, DALS, Deep Snake (simple), and Deep Snake (paper). When
+        the flame is directly visible, the U-Net&ndash;based methods segment it
+        well, while classical Snakes cannot deform around the irregular shapes.
+      </figcaption>
+    </figure>
+
+    <figure>
+      <img src="report/figs/paper/f2_gallery.png" alt="FLAME-2 dataset gallery">
+      <figcaption>
+        <b>The FLAME-2 task.</b> Top: RGB (aerial, heavily smoke-obscured);
+        middle: paired colorized infrared (hottest fire appears as bright
+        white/cyan speckle); bottom: ground truth derived from the infrared. The
+        fire is almost invisible in RGB, so the label must come from the thermal
+        signal.
+      </figcaption>
+    </figure>
+
+    <figure>
+      <img src="report/figs/paper/flame2_metrics.png" alt="FLAME-2 metrics">
+      <figcaption>
+        <b>FLAME-2 test results.</b> Only oracle-initialized GAC and Kass, which
+        are handed the fire location, perform; every method that must detect the
+        fire from RGB alone sits near the color floor. The bottleneck is
+        locating obscured fire, not refining a contour around it.
+      </figcaption>
+    </figure>
+
+    <figure>
+      <img src="report/figs/paper/combined_transfer.png" alt="Combined dataset transfer">
+      <figcaption>
+        <b>Pooling FLAME 1+2+3 versus dataset-specific training</b> (per-dataset
+        test IoU). Combining the datasets degrades U-Net on all three and
+        collapses DALS, because FLAME-1's visible-flame labels and FLAME-2/3's
+        thermal-hot labels give the model contradictory supervision. Only the
+        detector-free Deep Snake is roughly neutral.
+      </figcaption>
+    </figure>
+
+    <p class="note">
+      Place the compiled <code>report.pdf</code> next to this file, and the
+      project source in a <code>code/</code> subfolder (or use the GitHub link),
+      before zipping for submission.
+    </p>
+  </section>
+
+  <footer>
+    CS&nbsp;269 &mdash; Term Project &nbsp;&middot;&nbsp; Active Contour Models for Wildfire Segmentation
+  </footer>
+
+</div>
+</body>
+</html>
