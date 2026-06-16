@@ -29,7 +29,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from flame.data import (FLAME2_DIR, FLAME2_RGB_DIR, FLAME2_MASK_DIR,
+from code.flame.data import (FLAME2_DIR, FLAME2_RGB_DIR, FLAME2_MASK_DIR,
                         FLAME2_IR_DIR, flame2_fire_mask)
 
 ZIP = FLAME2_DIR / "#1-7) All Video Pairs.zip"

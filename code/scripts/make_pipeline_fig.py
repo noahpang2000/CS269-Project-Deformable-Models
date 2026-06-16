@@ -14,8 +14,8 @@ from matplotlib.lines import Line2D
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from flame.data import load_frame, smoke_fraction
-from flame.splits import make_splits
+from code.flame.data import load_frame, smoke_fraction
+from code.flame.splits import make_splits
 
 plt.rcParams["font.family"] = "DejaVu Sans"
 

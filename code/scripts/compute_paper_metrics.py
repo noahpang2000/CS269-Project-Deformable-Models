@@ -10,13 +10,13 @@ import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from flame.data import load_frame
-from flame.splits import make_splits
-from flame.metrics import iou as iou_fn, dice as dice_fn
-from flame.deep.unet import UNet
-from flame.deep.deep_snake_simplified import DeepSnake
-from flame.deep.deep_snake import DeepSnakePipeline
-import run_deep as R
+from code.flame.data import load_frame
+from code.flame.splits import make_splits
+from code.flame.metrics import iou as iou_fn, dice as dice_fn
+from code.flame.deep.unet import UNet
+from code.flame.deep.deep_snake_simplified import DeepSnake
+from code.flame.deep.deep_snake import DeepSnakePipeline
+import code.run_deep as R
 
 SIZE, device = 512, "cuda"
 

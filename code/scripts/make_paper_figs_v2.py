@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "report" / "figs" / "paper"
 OUT.mkdir(parents=True, exist_ok=True)
 
-from flame.data import load_frame, smoke_fraction
-from flame.splits import make_splits
+from code.flame.data import load_frame, smoke_fraction
+from code.flame.splits import make_splits
 
 SMOKE_TAU = 0.5  # frames with smoke_fraction >= this are degenerate; excluded
 
@@ -33,13 +33,13 @@ def clean_ids(ds, k=4, min_gt_px=200):
         if len(out) >= k:
             break
     return out
-from flame.contour_utils import fire_energy
-from flame.metrics import iou as iou_fn, dice as dice_fn
-from flame.deep.unet import UNet
-from flame.deep.dals import DALS
-from flame.deep.deep_snake_simplified import DeepSnake
-from flame.deep.deep_snake import DeepSnakePipeline
-import run_deep as R
+from code.flame.contour_utils import fire_energy
+from code.flame.metrics import iou as iou_fn, dice as dice_fn
+from code.flame.deep.unet import UNet
+from code.flame.deep.dals import DALS
+from code.flame.deep.deep_snake_simplified import DeepSnake
+from code.flame.deep.deep_snake import DeepSnakePipeline
+import code.run_deep as R
 
 SIZE, device = 512, "cuda"
 RED, BLUE, GRN = (0, 0, 255), (255, 90, 0), (0, 200, 0)
@@ -256,8 +256,8 @@ def fig_paper_snake():
 
 # ===== FIG H: initialization study visual (GAC color vs oracle, FLAME-3) =====
 def fig_init_study():
-    from flame.gac import run_gac, GACConfig
-    from flame.baselines import color_threshold_mask
+    from code.flame.gac import run_gac, GACConfig
+    from code.flame.baselines import color_threshold_mask
     sz = 320
     fid = clean_ids("flame3", 1)[0]
     fr = load_frame(fid, dataset="flame3")
@@ -278,9 +278,9 @@ def fig_init_study():
 
 # ===== FIG I: what oracle initialization looks like (FLAME-1) =====
 def fig_oracle_init():
-    from flame.contour_utils import (init_snake_from_mask, polygon_to_mask,
+    from code.flame.contour_utils import (init_snake_from_mask, polygon_to_mask,
                                      outer_contour, largest_component_mask)
-    from flame.gac import run_gac, GACConfig
+    from code.flame.gac import run_gac, GACConfig
     sz = 340
     fid = make_splits(dataset="flame1")["test"][2]
     fr = load_frame(fid, dataset="flame1", max_side=sz)   # downscale for the classical run
@@ -303,9 +303,9 @@ def fig_oracle_init():
 
 # ===== FIG J: broad FLAME-1 output gallery across ALL method types =====
 def fig_all_methods():
-    from flame.kass import run_kass, KassConfig
-    from flame.gac import run_gac, GACConfig
-    from flame.deep.deep_snake import DeepSnakePipeline
+    from code.flame.kass import run_kass, KassConfig
+    from code.flame.gac import run_gac, GACConfig
+    from code.flame.deep.deep_snake import DeepSnakePipeline
     sz = 240
     ids = [F1_DIVERSE[0], F1_DIVERSE[1], F1_DIVERSE[3]]   # diverse: big-left, centered, far-right
     un = load_unet("models/flame1_unet.pt")

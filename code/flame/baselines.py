@@ -10,7 +10,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from flame.contour_utils import fire_energy
+from code.flame.contour_utils import fire_energy
 
 # R-G barely separates the thermal-defined fire from background on this data
 # (the hot core reads bright/white, not red), so any tau scores near zero; this

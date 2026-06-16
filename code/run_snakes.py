@@ -19,12 +19,12 @@ from pathlib import Path
 
 import numpy as np
 
-from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
-from flame.baselines import DEFAULT_TAU, color_threshold_mask
-from flame.metrics import dice, iou
-from flame.kass import KassConfig, run_kass
-from flame.gac import GACConfig, run_gac
-from flame.splits import make_splits
+from code.flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, list_frame_ids, load_frame
+from code.flame.baselines import DEFAULT_TAU, color_threshold_mask
+from code.flame.metrics import dice, iou
+from code.flame.kass import KassConfig, run_kass
+from code.flame.gac import GACConfig, run_gac
+from code.flame.splits import make_splits
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 

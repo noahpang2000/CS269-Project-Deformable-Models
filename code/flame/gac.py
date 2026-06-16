@@ -9,8 +9,8 @@ from skimage.segmentation import (
     morphological_geodesic_active_contour,
 )
 
-from flame.data import Frame
-from flame.contour_utils import fire_energy, dilated_level_set
+from code.flame.data import Frame
+from code.flame.contour_utils import fire_energy, dilated_level_set
 
 
 @dataclass

@@ -61,9 +61,9 @@ print("synth_sample.png")
 
 # ---- Fig 4: U-Net is not spotty -- pred components match GT ----
 import torch
-from flame.deep.unet import UNet
-from flame.data import load_frame
-from flame.splits import make_splits
+from code.flame.deep.unet import UNet
+from code.flame.data import load_frame
+from code.flame.splits import make_splits
 m = UNet().cuda().eval()
 m.load_state_dict(torch.load(ROOT / "models/flame1_unet.pt", map_location="cuda", weights_only=True))
 fid = make_splits(dataset="flame1")["test"][2]

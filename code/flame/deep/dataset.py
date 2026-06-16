@@ -10,8 +10,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
-from flame.contour_utils import (
+from code.flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
+from code.flame.contour_utils import (
     largest_component_mask,
     outer_contour,
     resample_polygon,

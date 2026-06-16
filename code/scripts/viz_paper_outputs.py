@@ -8,10 +8,10 @@ import numpy as np
 import cv2
 import torch
 
-from flame.data import load_frame
-from flame.deep.deep_snake import DeepSnakePipeline
-from flame.contour_utils import polygon_to_mask
-from flame.metrics import iou as iou_fn
+from code.flame.data import load_frame
+from code.flame.deep.deep_snake import DeepSnakePipeline
+from code.flame.contour_utils import polygon_to_mask
+from code.flame.metrics import iou as iou_fn
 
 SIZE = 512
 DET_CFG = "flame/deep/centernet_flame1.py"

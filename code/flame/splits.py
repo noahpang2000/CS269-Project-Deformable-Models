@@ -7,7 +7,7 @@ into train and all of FLAME-3 into test).
 """
 from __future__ import annotations
 
-from flame.data import DEFAULT_DATASET, COMBINED_DATASETS, list_frame_ids
+from code.flame.data import DEFAULT_DATASET, COMBINED_DATASETS, list_frame_ids
 
 
 def _contiguous(ids: list[str], train: float, val: float) -> dict[str, list[str]]:

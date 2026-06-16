@@ -15,16 +15,16 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "report" / "figs" / "per_model"
 OUT.mkdir(parents=True, exist_ok=True)
 
-from flame.data import load_frame, smoke_fraction
-from flame.splits import make_splits
-from flame.metrics import iou as iou_fn, dice as dice_fn
-from flame.deep.unet import UNet
-from flame.deep.dals import DALS
-from flame.deep.deep_snake_simplified import DeepSnake
-from flame.deep.deep_snake import DeepSnakePipeline
-from flame.kass import run_kass, KassConfig
-from flame.gac import run_gac, GACConfig
-import run_deep as R
+from code.flame.data import load_frame, smoke_fraction
+from code.flame.splits import make_splits
+from code.flame.metrics import iou as iou_fn, dice as dice_fn
+from code.flame.deep.unet import UNet
+from code.flame.deep.dals import DALS
+from code.flame.deep.deep_snake_simplified import DeepSnake
+from code.flame.deep.deep_snake import DeepSnakePipeline
+from code.flame.kass import run_kass, KassConfig
+from code.flame.gac import run_gac, GACConfig
+import code.run_deep as R
 
 SIZE, device = 512, "cuda"
 RED, BLUE = (0, 0, 255), (255, 90, 0)

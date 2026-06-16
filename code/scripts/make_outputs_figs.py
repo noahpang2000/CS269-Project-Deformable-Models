@@ -11,14 +11,14 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "report" / "figs" / "outputs"
 OUT.mkdir(parents=True, exist_ok=True)
 
-from flame.data import load_frame
-from flame.splits import make_splits
-from flame.deep.unet import UNet
-from flame.deep.dals import DALS
-from flame.deep.deep_snake_simplified import DeepSnake
-from flame.deep.deep_snake import DeepSnakePipeline
-from flame.contour_utils import polygon_to_mask
-import run_deep as R
+from code.flame.data import load_frame
+from code.flame.splits import make_splits
+from code.flame.deep.unet import UNet
+from code.flame.deep.dals import DALS
+from code.flame.deep.deep_snake_simplified import DeepSnake
+from code.flame.deep.deep_snake import DeepSnakePipeline
+from code.flame.contour_utils import polygon_to_mask
+import code.run_deep as R
 
 SIZE, MINCC, device = 512, 30, "cuda"
 DET_CFG = str(ROOT / "flame/deep/centernet_flame1.py")
@@ -68,7 +68,7 @@ def pred_snake_paper(pipe, frame):
 
 
 def main():
-    from flame.metrics import iou as iou_fn
+    from code.flame.metrics import iou as iou_fn
     test = make_splits(dataset="flame1")["test"]
     # representative frames: a couple big fires, a couple sparse
     picks = [test[2], test[20], test[50], test[120]]

@@ -25,13 +25,13 @@ import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from flame.data import load_frame
-from flame.splits import make_splits
-from flame.metrics import iou as iou_fn, dice as dice_fn
-from flame.baselines import DEFAULT_TAU, color_threshold_mask
-from flame.kass import KassConfig, run_kass
-from flame.gac import GACConfig, run_gac
-import run_deep as R
+from code.flame.data import load_frame
+from code.flame.splits import make_splits
+from code.flame.metrics import iou as iou_fn, dice as dice_fn
+from code.flame.baselines import DEFAULT_TAU, color_threshold_mask
+from code.flame.kass import KassConfig, run_kass
+from code.flame.gac import GACConfig, run_gac
+import code.run_deep as R
 
 SIZE, DEVICE = 512, "cuda" if torch.cuda.is_available() else "cpu"
 DEEP_METHODS = ["unet", "dals", "deep_snake_simple"]

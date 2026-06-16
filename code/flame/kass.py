@@ -7,8 +7,8 @@ import numpy as np
 from skimage.filters import gaussian
 from skimage.segmentation import active_contour
 
-from flame.data import Frame
-from flame.contour_utils import fire_energy, init_snake_from_mask, polygon_to_mask
+from code.flame.data import Frame
+from code.flame.contour_utils import fire_energy, init_snake_from_mask, polygon_to_mask
 
 
 @dataclass

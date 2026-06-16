@@ -25,10 +25,10 @@ sys.path.insert(0, str(ROOT))
 OUT = ROOT / "report" / "figs" / "paper"
 OUT.mkdir(parents=True, exist_ok=True)
 
-from flame.data import load_frame, FLAME2_IR_DIR
-from flame.splits import make_splits
-from flame.metrics import iou as iou_fn, dice as dice_fn
-import run_deep as R
+from code.flame.data import load_frame, FLAME2_IR_DIR
+from code.flame.splits import make_splits
+from code.flame.metrics import iou as iou_fn, dice as dice_fn
+import code.run_deep as R
 
 SIZE, device = 512, "cuda" if torch.cuda.is_available() else "cpu"
 RED, BLUE, GAP = (0, 0, 255), (255, 90, 0), 4

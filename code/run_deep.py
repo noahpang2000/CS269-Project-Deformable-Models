@@ -24,16 +24,16 @@ import torch
 from torch.utils.data import DataLoader
 import torchvision.models as models
 
-from flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
-from flame.contour_utils import polygon_to_mask
-from flame.metrics import dice, iou
-from flame.splits import make_splits
-from flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset, PaperSnakeDataset
-from flame.deep.losses import bce_dice, cyclic_contour_loss, dice_loss, snake_contour_loss
-from flame.deep.unet import UNet
-from flame.deep.dals import DALS
-from flame.deep.deep_snake_simplified import DeepSnake
-from flame.deep.deep_snake import DeepSnakePaper, DeepSnakePipeline
+from code.flame.data import DEFAULT_DATASET, DEFAULT_THRESHOLD_C, load_frame
+from code.flame.contour_utils import polygon_to_mask
+from code.flame.metrics import dice, iou
+from code.flame.splits import make_splits
+from code.flame.deep.dataset import NET_SIZE, FlameDataset, SnakeDataset, PaperSnakeDataset
+from code.flame.deep.losses import bce_dice, cyclic_contour_loss, dice_loss, snake_contour_loss
+from code.flame.deep.unet import UNet
+from code.flame.deep.dals import DALS
+from code.flame.deep.deep_snake_simplified import DeepSnake
+from code.flame.deep.deep_snake import DeepSnakePaper, DeepSnakePipeline
 
 ROOT = Path(__file__).resolve().parent
 MODELS_DIR = ROOT / "models"
@@ -181,7 +181,7 @@ def _gac_predict_from_boxes(pipe, frame, size, device, conf_threshold: float) ->
     active contour (no learning) evolves a box-seeded level set to the fire
     boundary on the fire-energy map. Tests whether classical evolution beats the
     learned offset-snake from the same per-instance boxes."""
-    from flame.gac import run_gac, GACConfig
+    from code.flame.gac import run_gac, GACConfig
     x = image_tensor(frame.rgb, size, device)
     boxes = _detector_boxes(pipe, x, conf_threshold)
     if len(boxes) == 0:
@@ -196,7 +196,7 @@ def _gac_predict_from_boxes(pipe, frame, size, device, conf_threshold: float) ->
             seed[y0:y1, x0:x1] = 255
     # Run GAC on a size-resolution copy of the frame. fire_energy needs the RGB at
     # the same resolution as the seed.
-    from flame.data import Frame
+    from code.flame.data import Frame
     rgb_rs = cv2.resize(frame.rgb, (size, size), interpolation=cv2.INTER_LINEAR)
     f_rs = Frame(frame_id=frame.frame_id, rgb=rgb_rs, thermal_c=None,
                  gt_mask=np.zeros((size, size), np.uint8))

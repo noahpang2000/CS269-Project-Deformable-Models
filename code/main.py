@@ -1,4 +1,4 @@
-from methods import ClassicalSnakeBaseline
+from code.methods import ClassicalSnakeBaseline
 import numpy as np
     
 

@@ -16,9 +16,9 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from flame.data import (DEFAULT_DATASET, PROJECT_ROOT, RGB_DIR,
+from code.flame.data import (DEFAULT_DATASET, PROJECT_ROOT, RGB_DIR,
                         FLAME1_RGB_DIR, FLAME2_RGB_DIR, load_frame)
-from flame.splits import make_splits
+from code.flame.splits import make_splits
 
 MIN_CC_PX = 30
 

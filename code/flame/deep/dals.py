@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from flame.deep.unet import UNet
+from code.flame.deep.unet import UNet
 
 
 def _heaviside(phi: torch.Tensor, eps: float = 1.0) -> torch.Tensor:
