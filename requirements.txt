@@ -1,8 +1,0 @@
-numpy
-opencv-python
-scikit-image
-tifffile
-
-# Deep baselines (run_deep.py) only. CPU wheels are fine; no GPU required.
-torch
-torchvision
